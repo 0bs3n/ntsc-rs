@@ -6,6 +6,7 @@ use std::fmt::Debug;
 use std::fs::File;
 use std::io::{ Read, Write };
 
+const NTSC_VISIBLE_LINE_COUNT: usize = 480;
 
 // Y′=0.299⋅R+0.587⋅G+0.114⋅B
 // weights above sum to 1, resulting Y' will always be <= 255
@@ -155,13 +156,16 @@ fn sample3D<D: Signal>(data: &[D], width: usize, scale: f32, method: SamplingMet
     sampled
 }
 
+
+
 pub trait Signal: Debug + Copy {
     fn scale_f32(&self, scalar: f32) -> Self;
     fn add(&self, other: Self) -> Self;
     fn sub(&self, other: Self) -> Self;
-    // TODO: because the scale_f32 function truncates the resulting value, the subsequent adds lose
-    // at worst 0.99 units of preceision per element in the window. with for convolutions with large window
-    // sizes, this causes distortions in the output signal, even if every element in the window is the same.
+    // TODO: if the scale_f32 function truncates the resulting value, the subsequent adds lose
+    // at worst 0.99 units of preceision per element in the window. if they round instead, worst loss
+    // is 0.5 units. with for convolutions with large window sizes, this causes distortions in the 
+    // output signal, even if every element in the window is the same.
     //
     // i.e., convolution over &[u8], window contains all 255. kernel radius is 10.
     // scale_f32 multiplies the value 255 by the weight (1.0 / (10 * 2 + 1)) == 0.04761905
@@ -173,12 +177,14 @@ pub trait Signal: Debug + Copy {
     // This leads to an overall slight attenuation of the signal due to precision loss
     // if instead scale_by rounded to the nearest rather than truncating, precision loss would be limited
     // to 0.5 units - and the result might be a slight attenuation or amplification of the signal,
-    // but a smaller one.
+    // but a smaller one. However calling `round()` in scale_f32 has a massive performance hit,
+    // so sticking with greater precision loss but better perf. 
+    // worst case for truncation: roughly one unit of loss per window element, so
+    // worst case is an attenuation of kernel_size to every sample. pretty bad with 
+    // large window sizes.
     fn convolve(window: &[Self], kernel: &[f32]) -> Self {
         window.iter().zip(kernel)
-        .map(|(&w, &k)| {
-            w.scale_f32(k)
-        })
+        .map(|(&w, &k)| w.scale_f32(k))
         .reduce(|a, b| a.add(b)).unwrap()
     }
     fn filter<D: Signal>(data: &[D], kernel: &[f32]) -> Vec<D> {
@@ -204,35 +210,11 @@ pub trait Signal: Debug + Copy {
         }
         output
     }
-    fn moving_average<D: Signal>(data: &[D], kernel_radius: usize) -> Vec<D> {
-        let mut output = Vec::<D>::new();
-
-        let kernel_size = kernel_radius * 2 + 1;
-        let weight = 1.0 / kernel_size as f32; // simple moving average
-        let kernel = vec![weight; kernel_size];
-        let r = (kernel_size - 1) / 2;
-
-        let left_padding = vec![data[0]; r];
-        let right_padding = vec![data[data.len() - 1]; r];
-
-        for i in 0..data.len() {
-            let window = if i < r {
-                &[&left_padding[0..r - i], &data[i..i + r + 1]].concat()
-            } else if i > (data.len() - r - 1) {
-                &[&data[i - r..data.len()], &right_padding[0..r - ((data.len() - 1) - i)]].concat()
-            } else {
-                &data[i - r ..= i + r]
-            };
-
-            output.push(D::convolve(window, &kernel));
-        }
-        output
-    }
 }
 
 impl Signal for u8 {
     fn scale_f32(&self, scalar: f32) -> Self {
-        (*self as f32 * scalar).round() as Self
+        (*self as f32 * scalar) as Self
     }
     fn add(&self, other: Self) -> Self {
         self + other
@@ -256,7 +238,7 @@ impl Signal for f32 {
 
 impl Signal for image::Luma<u8> {
     fn scale_f32(&self, scalar: f32) -> Self {
-        image::Luma([(self.0[0] as f32 * scalar).round() as u8])
+        image::Luma([(self.0[0] as f32 * scalar) as u8])
     }
     fn add(&self, other: Self) -> Self {
         image::Luma([(self.0[0].saturating_add(other.0[0]))])
@@ -268,9 +250,9 @@ impl Signal for image::Luma<u8> {
     
 impl Signal for Rgb<u8> {
     fn scale_f32(&self, scalar: f32) -> Self {
-        let r = (self.0[0] as f32 * scalar).round() as u8;
-        let g = (self.0[1] as f32 * scalar).round() as u8;
-        let b = (self.0[2] as f32 * scalar).round() as u8;
+        let r = (self.0[0] as f32 * scalar) as u8;
+        let g = (self.0[1] as f32 * scalar) as u8;
+        let b = (self.0[2] as f32 * scalar) as u8;
         Rgb([r, g, b])
     }
     fn add(&self, other: Self) -> Self {
@@ -287,13 +269,113 @@ impl Signal for Rgb<u8> {
     }
 }
 
+fn crop_symmetric_1d<D>(data: &[D], width: usize) -> &[D] {
+    let offset = (data.len() - width) / 2;
+    &data[offset..data.len() - offset]
+}
+
+fn crop_symmetric_width_2d<D: Clone>(data: &[D], width: usize, height: usize, crop_to: usize) -> (usize, usize, Vec<D>) {
+    let mut cropped = Vec::<D>::new();
+    for i in 0..height {
+        let row_start =  i as usize * width as usize;
+        let row_end = row_start + width as usize;
+        let row = &data[row_start..row_end];
+        cropped.append(&mut crop_symmetric_1d(row, crop_to).to_vec());
+    }
+    (crop_to, height, cropped)
+}
+
+#[derive(Debug)]
+enum CropDirection {
+    Vertical,
+    Horizontal
+}
+struct CropParams {
+    magnitude: usize,
+    direction: CropDirection
+}
+
+fn crop_symmetric_2d<D: Clone>(data: &[D], width: usize, height: usize, crop_params: CropParams) -> (usize, usize, Vec<D>) {
+    let mut cropped = Vec::<D>::new();
+
+    for y in 0..height {
+        let row_start =  y as usize * width as usize;
+        let row_end = row_start + width as usize;
+        let row = &data[row_start..row_end];
+
+        match crop_params.direction {
+            CropDirection::Vertical   => {
+                let offset = (height - crop_params.magnitude) / 2;
+                if y < offset { continue }
+                if y >= height - offset { 
+                    return (width, crop_params.magnitude, cropped) 
+                }
+                println!("offset: {}, y: {}, row_start: {}, row_end: {}", offset, y, row_start, row_end);
+                println!("row length: {}", row.len());
+                cropped.append(&mut row.to_vec());
+            }
+            CropDirection::Horizontal => {
+                let offset = (width - crop_params.magnitude) / 2;
+                cropped.append(&mut row[offset..row.len() - offset - 1].to_vec());
+            }
+        }
+    }
+    return (crop_params.magnitude, height, cropped);
+}
+
+fn crop_for_ntsc<D: Clone>(data: &[D], width: usize, height: usize) -> (usize, usize, Vec<D>) {
+    // let output = Vec::<D>::new();
+    let cp: CropParams;
+    let current_ar = height as f32 / width as f32;
+    if current_ar < 0.75 { // Aspect ratio greater than 4:3, i.e. 16:9
+        let magnitude = (height as f32 / 0.75) as usize;
+        cp = CropParams {
+            magnitude,
+            direction: CropDirection::Horizontal
+        };
+    } else { // aspect ratio less than 4:3, i.e. 1:1
+        let magnitude = (width as f32 * 0.75) as usize;
+        cp = CropParams {
+            magnitude,
+            direction: CropDirection::Vertical
+        };
+    }
+    crop_symmetric_2d(data, width, height, cp)
+}
+
 fn moving_average_kernel(radius: usize) -> Vec<f32> {
     vec![1.0 / (radius * 2 + 1) as f32; radius * 2 + 1]
 }
 
+fn ntsc_process_frame<D: image::Pixel + Signal>(pixels: &[D], width: usize, height: usize) -> (usize, usize, Vec<D>) {
+    let (cropped_width, cropped_height, pixels) = 
+        crop_for_ntsc(&pixels, width as usize, height as usize);
+
+
+    let scale = NTSC_VISIBLE_LINE_COUNT as f32 / cropped_height as f32;
+    let scaled_width = (cropped_width as f32 * scale) as u32;
+    let scaled_height = (cropped_height as f32 * scale) as u32;
+
+
+    let mut sampled = sample3D(&pixels, cropped_width as usize, scale, SamplingMethod::Bilinear);
+
+    let kernel = moving_average_kernel(5);
+
+    for y in 0..scaled_height {
+        let start =  y as usize * scaled_width as usize;
+        let end = start + scaled_width as usize;
+        let row = &mut sampled[start..end];
+        let lpf_row = Rgb::filter(row, &kernel);
+        for (dst, src) in row.iter_mut().zip(lpf_row.iter()) {
+            *dst = *src;
+        }
+    }
+    (scaled_width as usize, scaled_height as usize, sampled)
+}
+
 #[cfg(test)]
 mod tests {
-    use image::ImageBuffer;
+    use image::{imageops::crop, ImageBuffer, RgbImage};
 
     use super::*;
 
@@ -303,52 +385,136 @@ mod tests {
     }
 
     #[test]
-    fn it_preprocesses_for_ntsc() {
+    fn it_crops_for_ntsc() {
+        let filename = "/home/sen/Projects/RS170/PM5644.png";
+        let img_ = ImageReader::open(filename).unwrap().decode().unwrap();
+        let img = img_.to_rgb8();
+        let pixels = img.enumerate_pixels().map(|(_, _, pixel)| *pixel).collect::<Vec<Rgb<u8>>>();
+        let (cropped_width, cropped_height, new_pixels) = 
+            crop_for_ntsc(&pixels, img.width() as usize, img.height() as usize);
+        let img = image::ImageBuffer::from_fn(
+            cropped_width as u32, cropped_height as u32, |x, y| {
+                let index = (y * cropped_width as u32 + x) as usize;
+                new_pixels[index]
+            }
+        );
+        img.save("cropped_for_ntsc.png").unwrap();
+    }
+
+    #[test]
+    fn it_crops_2d() {
+        let crop_width = 400;
+        let crop_params = CropParams { 
+            magnitude: crop_width, 
+            direction: CropDirection::Vertical 
+        };
+        let filename = "/home/sen/Projects/RS170/PM5644.png";
+        let img_ = ImageReader::open(filename).unwrap().decode().unwrap();
+        let img = img_.to_rgb8();
+        let pixels = img.enumerate_pixels()
+            .map(|(_, _, pixel)| *pixel)
+            .collect::<Vec<Rgb<u8>>>();
+
+        let (cropped_width, cropped_height, new_pixels) = 
+            crop_symmetric_2d(
+                &pixels, 
+                img.width() as usize, 
+                img.height() as usize, 
+                crop_params
+            );
+
+        println!("length: {:?}", new_pixels.len());
+
+        let img = image::ImageBuffer::from_fn(
+            cropped_width as u32, cropped_height as u32, |x, y| {
+                let index = (y * cropped_width as u32 + x) as usize;
+                new_pixels[index]
+            }
+        );
+        img.save("/home/sen/Projects/RS170/crop_test.png");
+    }
+
+    #[test]
+    fn it_crops_1d() {
+        let crop_width = 8;
+        let mut img = RgbImage::new(10, 10);
+        for (x, y, pixel) in img.enumerate_pixels_mut() {
+            *pixel = Rgb([255, 255, 255]);
+        }
+        let pixels = img.enumerate_pixels()
+            .map(|(_, _, pixel)| *pixel)
+            .collect::<Vec<Rgb<u8>>>();
+
+        let mut new_pixels = Vec::<Rgb<u8>>::new();
+        for i in 0..img.height() {
+            let row_start =  i as usize * img.width() as usize;
+            let row_end = row_start + img.width() as usize;
+            let row = &pixels[row_start..row_end];
+            new_pixels.append(&mut crop_symmetric_1d(row, crop_width).to_vec());
+        }
+        let img = image::ImageBuffer::from_fn(
+            crop_width as u32, img.height(), |x, y| {
+                let index = (y * crop_width as u32 + x) as usize;
+                new_pixels[index]
+            }
+        );
+        img.save("/home/sen/Projects/RS170/crop_test.png");
+    }
+
+    #[test]
+    fn it_processes_30_frames() {
         const NTSC_VISIBLE_LINE_COUNT: usize = 640;
         let filename = "/home/sen/Projects/RS170/PM5644.png";
         let img_ = ImageReader::open(filename).unwrap().decode().unwrap();
         let img = img_.to_rgb8();
+        for _ in 0..30 {
+            let pixels = img.enumerate_pixels().map(|(_, _, pixel)| *pixel).collect::<Vec<Rgb<u8>>>();
 
-        let scale = NTSC_VISIBLE_LINE_COUNT as f32 / img.width() as f32;
-        let scaled_width = (img.width() as f32 * scale) as u32;
-        let scaled_height = (img.height() as f32 * scale) as u32;
+            let (cropped_width, cropped_height, pixels) = 
+                crop_for_ntsc(&pixels, img.width() as usize, img.height() as usize);
 
-        let pixels = img.enumerate_pixels().map(|(_, _, pixel)| *pixel).collect::<Vec<Rgb<u8>>>();
-        let sampled = sample3D(&pixels, img.width() as usize, scale, SamplingMethod::Bilinear);
+            let scale = NTSC_VISIBLE_LINE_COUNT as f32 / cropped_width as f32;
+            let scaled_width = (cropped_width as f32 * scale) as u32;
+            let scaled_height = (cropped_height as f32 * scale) as u32;
 
-        let mut img = image::ImageBuffer::from_fn(
-            scaled_width, scaled_height, |x, y| {
-                let index = (y * scaled_width + x) as usize;
-                sampled[index]
+
+            let mut sampled = sample3D(&pixels, cropped_width as usize, scale, SamplingMethod::Bilinear);
+
+            let kernel = moving_average_kernel(5);
+            for y in 0..scaled_height {
+                let start =  y as usize * scaled_width as usize;
+                let end = start + scaled_width as usize;
+                let row = &mut sampled[start..end];
+                let lpf_row = Rgb::filter(row, &kernel);
+                for (dst, src) in row.iter_mut().zip(lpf_row.iter()) {
+                    *dst = *src;
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn it_preprocesses_for_ntsc() {
+        let filename = "/home/sen/Projects/RS170/PM5644.png";
+        let img_ = ImageReader::open(filename).unwrap().decode().unwrap();
+        let img = img_.to_rgb8();
+
+        // TODO: see if going back to the strategy using as_mut/unsafe is faster
+        let pixels = img.enumerate_pixels()
+            .map(|(_, _, pixel)| *pixel)
+            .collect::<Vec<Rgb<u8>>>();
+
+        let (pwidth, pheight, pdata) = 
+            ntsc_process_frame(&pixels, img.width() as usize, img.height() as usize);
+
+        let img = image::ImageBuffer::from_fn(
+            pwidth as u32, pheight as u32, |x, y| {
+                let index = (y * pwidth as u32 + x) as usize;
+                pdata[index]
             }
         );
 
-        img.save("/home/sen/Projects/RS170/scaled_by_ntsc_height.png").unwrap();
-
-        let height = img.height() as usize;
-        let width = img.width() as usize;
-
-        let pixels = img.as_mut();
-
-        let kernel = moving_average_kernel(10);
-
-        for i in 0..height {
-            let row_start =  i as usize * width * 3;
-            let row_end = row_start + (width * 3);
-
-            let row_bytes = &mut pixels[row_start..row_end];
-            let row_pixels: &mut [Rgb<u8>] = unsafe {
-                std::slice::from_raw_parts_mut(row_bytes.as_mut_ptr() as *mut Rgb<u8>, width)
-            };
-
-            let lpf_row = Rgb::filter(row_pixels, &kernel);
-
-            for (dst, src) in row_pixels.iter_mut().zip(lpf_row.iter()) {
-                *dst = *src;
-            }
-        }
-
-        img.save("/home/sen/Projects/RS170/scaled_and_filtered.png").unwrap();
+        img.save("/home/sen/Projects/RS170/scaled_and_filtered_and_cropped.png").unwrap();
     }
 
     #[test]
@@ -390,8 +556,6 @@ mod tests {
         let filtered_data = u8::filter(data.as_slice(), &kernel);
         println!("original:\t{:02x?}", data);
         println!("filtered:\t{:02x?}", filtered_data);
-        let filtered_data = u8::moving_average(data.as_slice(), radius);
-        println!("filtered2:\t{:02x?}", filtered_data);
 
         let data: Vec<Rgb<u8>> = vec![
             Rgb([255,255,255]), Rgb([255,255,255]), Rgb([255,255,255]), Rgb([255,255,255]), Rgb([255,255,255]), Rgb([255,255,255]),
@@ -404,8 +568,6 @@ mod tests {
         let filtered_data = u8::filter(data.as_slice(), &kernel);
         println!("original:\t{:02x?}", data);
         println!("filtered:\t{:02x?}", filtered_data);
-        let filtered_data = u8::moving_average(data.as_slice(), radius);
-        println!("filtered2:\t{:02x?}", filtered_data);
     }
 
     #[test]
