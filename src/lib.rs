@@ -159,16 +159,55 @@ pub trait Signal: Debug + Copy {
     fn scale_f32(&self, scalar: f32) -> Self;
     fn add(&self, other: Self) -> Self;
     fn sub(&self, other: Self) -> Self;
+    // TODO: because the scale_f32 function truncates the resulting value, the subsequent adds lose
+    // at worst 0.99 units of preceision per element in the window. with for convolutions with large window
+    // sizes, this causes distortions in the output signal, even if every element in the window is the same.
+    //
+    // i.e., convolution over &[u8], window contains all 255. kernel radius is 10.
+    // scale_f32 multiplies the value 255 by the weight (1.0 / (10 * 2 + 1)) == 0.04761905
+    // 255 * 0.04761905 == 12.142857750000001, which scale_f32 truncates before returning
+    // to accomodate the Self return type requirement, to 12. After kernel scaling has been
+    // applied, the intermediate array is [12u8; 21].
+    // this is then summed: 12 * 21 == 252, i.e. not 255.
+    //
+    // This leads to an overall slight attenuation of the signal due to precision loss
+    // if instead scale_by rounded to the nearest rather than truncating, precision loss would be limited
+    // to 0.5 units - and the result might be a slight attenuation or amplification of the signal,
+    // but a smaller one.
     fn convolve(window: &[Self], kernel: &[f32]) -> Self {
         window.iter().zip(kernel)
-        .map(|(&w, &k)| w.scale_f32(k))
+        .map(|(&w, &k)| {
+            w.scale_f32(k)
+        })
         .reduce(|a, b| a.add(b)).unwrap()
     }
-    fn moving_average<D: Signal>(data: &[D], kernel_size: usize) -> Vec<D> {
-        assert!(kernel_size % 2 != 0);
-
+    fn filter<D: Signal>(data: &[D], kernel: &[f32]) -> Vec<D> {
+        assert!(kernel.len() < data.len());
         let mut output = Vec::<D>::new();
 
+        let kernel_size = kernel.len();
+        let r = (kernel_size - 1) / 2;
+
+        let left_padding = vec![data[0]; r];
+        let right_padding = vec![data[data.len() - 1]; r];
+
+        for i in 0..data.len() {
+            let window = if i < r {
+                &[&left_padding[0..r - i], &data[i..i + r + 1]].concat()
+            } else if i > (data.len() - r - 1) {
+                &[&data[i - r..data.len()], &right_padding[0..r - ((data.len() - 1) - i)]].concat()
+            } else {
+                &data[i - r ..= i + r]
+            };
+
+            output.push(D::convolve(window, kernel));
+        }
+        output
+    }
+    fn moving_average<D: Signal>(data: &[D], kernel_radius: usize) -> Vec<D> {
+        let mut output = Vec::<D>::new();
+
+        let kernel_size = kernel_radius * 2 + 1;
         let weight = 1.0 / kernel_size as f32; // simple moving average
         let kernel = vec![weight; kernel_size];
         let r = (kernel_size - 1) / 2;
@@ -191,16 +230,13 @@ pub trait Signal: Debug + Copy {
     }
 }
 
-// do I need a "scaled type" type for the trait? hm...
 impl Signal for u8 {
     fn scale_f32(&self, scalar: f32) -> Self {
-        (*self as f32 * scalar) as Self
+        (*self as f32 * scalar).round() as Self
     }
-
     fn add(&self, other: Self) -> Self {
         self + other
     }
-
     fn sub(&self, other: Self) -> Self {
         self - other    
     }
@@ -210,11 +246,9 @@ impl Signal for f32 {
     fn scale_f32(&self, scalar: f32) -> Self {
         *self * scalar
     }
-
     fn add(&self, other: Self) -> Self {
         self + other
     }
-
     fn sub(&self, other: Self) -> Self {
         self - other    
     }
@@ -222,7 +256,7 @@ impl Signal for f32 {
 
 impl Signal for image::Luma<u8> {
     fn scale_f32(&self, scalar: f32) -> Self {
-        image::Luma([(self.0[0] as f32 * scalar) as u8])
+        image::Luma([(self.0[0] as f32 * scalar).round() as u8])
     }
     fn add(&self, other: Self) -> Self {
         image::Luma([(self.0[0].saturating_add(other.0[0]))])
@@ -234,20 +268,15 @@ impl Signal for image::Luma<u8> {
     
 impl Signal for Rgb<u8> {
     fn scale_f32(&self, scalar: f32) -> Self {
-        let r = (self.0[0] as f32 * scalar) as u8;
-        let g = (self.0[1] as f32 * scalar) as u8;
-        let b = (self.0[2] as f32 * scalar) as u8;
+        let r = (self.0[0] as f32 * scalar).round() as u8;
+        let g = (self.0[1] as f32 * scalar).round() as u8;
+        let b = (self.0[2] as f32 * scalar).round() as u8;
         Rgb([r, g, b])
     }
     fn add(&self, other: Self) -> Self {
-        // println!("Rgb<u8> Interpolate::add");
-        // println!("{:?} + {:?}", self, other);
         let r = self.0[0].saturating_add(other.0[0]);
         let g = self.0[1].saturating_add(other.0[1]);
         let b = self.0[2].saturating_add(other.0[2]);
-        // println!("r: {} + {} = {}", self.0[0], other.0[0], r);
-        // println!("g: {} + {} = {}", self.0[1], other.0[1], g);
-        // println!("b: {} + {} = {}", self.0[2], other.0[2], b);
         Rgb([r, g, b])
     }
     fn sub(&self, other: Self) -> Self {
@@ -258,97 +287,8 @@ impl Signal for Rgb<u8> {
     }
 }
 
-/*
-pub trait Filter<D: Signal>: Sized {
-    fn average(window: &[Self]) -> Self;
-    // fn convolve(window: &[Self], kernel: &[f32]) -> Self;
-    fn convolve(window: &[D], kernel: &[f32]) -> D {
-        window.iter().zip(kernel)
-        .map(|(&w, &k)| w.scale_f32(k))
-        .reduce(|a, b| a.add(b)).unwrap()
-    }
-
-}
-
-impl <D: Signal> Filter<D> for u8 {
-    fn average(window: &[Self]) -> Self {
-        (window.iter().sum::<u8>() as usize / window.len()) as u8
-    }
-    /*
-    fn convolve(window: &[Self], kernel: &[f32]) -> Self {
-        window.iter().zip(kernel)
-        .map(|(&w, &k)| w as f32 * k)
-        .reduce(|a, b| a + b).unwrap() as u8
-    }
-    */
-}
-
-impl <D: Signal> Filter<D> for Rgb<u8> {
-    fn average(window: &[Self]) -> Self {
-        // let r: usize = window.iter().map(|a| a.0[0] as usize).sum();
-        // let g: usize = window.iter().map(|a| a.0[1] as usize).sum();
-        // let b: usize = window.iter().map(|a| a.0[2] as usize).sum();
-        // Rgb([(r / length) as u8, (g / length) as u8, (b / length) as u8])
-
-        let cdata = window.iter()
-        .map(|p| [p.0[0] as usize, p.0[1] as usize, p.0[2] as usize])
-        .reduce(|a, b| [a[0] + b[0], a[1] + b[1], a[2] + b[2]]).unwrap()
-        .map(|x| (x / window.len()) as u8);
-
-        Rgb(cdata)
-    }
-    /*
-    fn convolve(window: &[Self], kernel: &[f32]) -> Self {
-        window.iter().zip(kernel)
-        .map(|(&w, &k)| w.scale_f32(k))
-        .reduce(|a, b| a.add(b)).unwrap()
-    }
-    */
-}
-fn moving_average<D: Signal>(data: &[D], radius: usize) -> Vec<D> {
-    let mut output = Vec::<D>::new();
-    let r = radius;
-
-    // Can this be done more dynamically? rust question
-    let left_padding = vec![data[0]; r];
-    let right_padding = vec![data[data.len() - 1]; r];
-
-    for i in 0..data.len() {
-        // if i is less than the window radius, we need padding on the left
-        let average: D = if i < r {
-            // TODO: This creates a new vec, innefficient - is there a way to do this without new allocation?
-            let window = &[&left_padding[0..r - i], &data[i..i + r + 1]].concat();
-            // println!("window (left padding): {:?}", window);
-            D::average(window)
-        } 
-        // if i is greater than length minus the radius minus 1 (i.e. len=10, r=2, i=7)
-        // we need right padding
-        else if i > (data.len() - r - 1) {
-            let window = &[
-                &data[i - r..data.len()], 
-                &right_padding[0..r - ((data.len() - 1) - i)]
-            ].concat();
-            // println!("window (right padding): {:?}", window);
-            D::average(window)
-        } else {
-            let window = &data[i - r ..= i + r];
-            // println!("window (no padding): {:?}", window);
-            D::average(window)
-        };
-
-        // println!("average: {:?}", average);
-        output.push(average);
-    }
-    output
-}
-*/
-
-fn _convert_image_to_rs170() {
-    // for each line in the image
-        // take N samples, N TBD
-        // convert each sample value in luma (0 to 255) to NTSC IRE (0 to 100)
-        // prepend required preamble,
-        // append required suffix
+fn moving_average_kernel(radius: usize) -> Vec<f32> {
+    vec![1.0 / (radius * 2 + 1) as f32; radius * 2 + 1]
 }
 
 #[cfg(test)]
@@ -363,29 +303,109 @@ mod tests {
     }
 
     #[test]
+    fn it_preprocesses_for_ntsc() {
+        const NTSC_VISIBLE_LINE_COUNT: usize = 640;
+        let filename = "/home/sen/Projects/RS170/PM5644.png";
+        let img_ = ImageReader::open(filename).unwrap().decode().unwrap();
+        let img = img_.to_rgb8();
+
+        let scale = NTSC_VISIBLE_LINE_COUNT as f32 / img.width() as f32;
+        let scaled_width = (img.width() as f32 * scale) as u32;
+        let scaled_height = (img.height() as f32 * scale) as u32;
+
+        let pixels = img.enumerate_pixels().map(|(_, _, pixel)| *pixel).collect::<Vec<Rgb<u8>>>();
+        let sampled = sample3D(&pixels, img.width() as usize, scale, SamplingMethod::Bilinear);
+
+        let mut img = image::ImageBuffer::from_fn(
+            scaled_width, scaled_height, |x, y| {
+                let index = (y * scaled_width + x) as usize;
+                sampled[index]
+            }
+        );
+
+        img.save("/home/sen/Projects/RS170/scaled_by_ntsc_height.png").unwrap();
+
+        let height = img.height() as usize;
+        let width = img.width() as usize;
+
+        let pixels = img.as_mut();
+
+        let kernel = moving_average_kernel(10);
+
+        for i in 0..height {
+            let row_start =  i as usize * width * 3;
+            let row_end = row_start + (width * 3);
+
+            let row_bytes = &mut pixels[row_start..row_end];
+            let row_pixels: &mut [Rgb<u8>] = unsafe {
+                std::slice::from_raw_parts_mut(row_bytes.as_mut_ptr() as *mut Rgb<u8>, width)
+            };
+
+            let lpf_row = Rgb::filter(row_pixels, &kernel);
+
+            for (dst, src) in row_pixels.iter_mut().zip(lpf_row.iter()) {
+                *dst = *src;
+            }
+        }
+
+        img.save("/home/sen/Projects/RS170/scaled_and_filtered.png").unwrap();
+    }
+
+    #[test]
     fn it_filters_2d() {
+        let radius = 10;
+        let kernel = moving_average_kernel(radius);
+
+        /*
         let data: Vec<u8> = vec![10, 5, 10, 5, 10, 10, 10, 10, 0, 0, 0, 0, 0, 0, 0, 0];
-        let filtered_data = u8::moving_average(data.as_slice(), 3);
+        let filtered_data = u8::filter2d(data.as_slice(), &kernel);
         println!("original:\t{:02x?}", data);
         println!("filtered:\t{:02x?}", filtered_data);
+        let filtered_data = u8::moving_average(data.as_slice(), radius);
+        println!("filtered2:\t{:02x?}", filtered_data);
 
         let data: Vec<Rgb<u8>> = vec![Rgb([255,255,255]), Rgb([0,0,0]), Rgb([255,255,255]), Rgb([0,0,0]), 
                                       Rgb([255,255,255]), Rgb([0,0,0]), Rgb([255,255,255]), Rgb([0,0,0]), 
                                       Rgb([255,255,255]), Rgb([0,0,0]), Rgb([255,255,255])];
 
-        let filtered_data = Rgb::moving_average(data.as_slice(), 3);
-
+        let filtered_data = u8::filter2d(data.as_slice(), &kernel);
         println!("original:\t{:02x?}", data);
         println!("filtered:\t{:02x?}", filtered_data);
+        let filtered_data = u8::moving_average(data.as_slice(), radius);
+        println!("filtered2:\t{:02x?}", filtered_data);
+        */
+
+        let data: Vec<u8> = vec![
+            0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 
+            0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+            0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+            0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+            0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+            0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+            0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+            0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+            0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+            0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+        ];
+        let filtered_data = u8::filter(data.as_slice(), &kernel);
+        println!("original:\t{:02x?}", data);
+        println!("filtered:\t{:02x?}", filtered_data);
+        let filtered_data = u8::moving_average(data.as_slice(), radius);
+        println!("filtered2:\t{:02x?}", filtered_data);
 
         let data: Vec<Rgb<u8>> = vec![
             Rgb([255,255,255]), Rgb([255,255,255]), Rgb([255,255,255]), Rgb([255,255,255]), Rgb([255,255,255]), Rgb([255,255,255]),
             Rgb([255,255,255]), Rgb([255,255,255]), Rgb([255,255,255]), Rgb([255,255,255]), Rgb([255,255,255]), Rgb([255,255,255]),
             Rgb([255,255,255]), Rgb([255,255,255]), Rgb([255,255,255]), Rgb([255,255,255]), Rgb([255,255,255]), Rgb([255,255,255]),
+            Rgb([255,255,255]), Rgb([255,255,255]), Rgb([255,255,255]), Rgb([255,255,255]), Rgb([255,255,255]), Rgb([255,255,255]),
+            Rgb([255,255,255]), Rgb([255,255,255]), Rgb([255,255,255]), Rgb([255,255,255]), Rgb([255,255,255]), Rgb([255,255,255]),
+            Rgb([255,255,255]), Rgb([255,255,255]), Rgb([255,255,255]), Rgb([255,255,255]), Rgb([255,255,255]), Rgb([255,255,255]),
         ];
-        let filtered_data = Rgb::moving_average(data.as_slice(), 3);
+        let filtered_data = u8::filter(data.as_slice(), &kernel);
         println!("original:\t{:02x?}", data);
-        println!("filtered:   \t{:02x?}", filtered_data);
+        println!("filtered:\t{:02x?}", filtered_data);
+        let filtered_data = u8::moving_average(data.as_slice(), radius);
+        println!("filtered2:\t{:02x?}", filtered_data);
     }
 
     #[test]
@@ -399,6 +419,8 @@ mod tests {
 
         let pixels = img.as_mut();
 
+        let kernel = moving_average_kernel(10);
+
         for i in 0..height {
             let row_start =  i as usize * width * 3;
             let row_end = row_start + (width * 3);
@@ -408,10 +430,10 @@ mod tests {
                 std::slice::from_raw_parts_mut(row_bytes.as_mut_ptr() as *mut Rgb<u8>, width)
             };
 
-            let lpf_row = Rgb::moving_average(row_pixels, 3);
+            let lpf_row = Rgb::filter(row_pixels, &kernel);
 
-            println!("{:?}", row_pixels);
-            println!("{:?}", lpf_row);
+            // println!("{:?}", row_pixels);
+            // println!("{:?}", lpf_row);
 
             for (dst, src) in row_pixels.iter_mut().zip(lpf_row.iter()) {
                 *dst = *src;
