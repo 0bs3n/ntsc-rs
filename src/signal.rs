@@ -1,5 +1,6 @@
-use crate::sample::Sample;
 use std::fmt;
+use std::marker::PhantomData;
+use crate::sample::Sample;
 
 pub enum SamplingMethod {
     Point,
@@ -32,36 +33,75 @@ impl SignalShape {
     }
 }
 
-pub struct Kernel {
-    pub shape: SignalShape,
-    pub data: Vec<f32>
+
+pub fn moving_average_kernel_new(shape: SignalShape) -> Kernel {
+    match shape { 
+        SignalShape::OneDimensional(size) => 
+            Signal::new(shape, vec![1.0 / size as f32; size]),
+        SignalShape::TwoDimensional(width, height) => 
+            Signal::new(shape, vec![1.0 / (width * height) as f32; width * height])
+    }
 }
 
-impl Kernel {
-    pub fn moving_average(shape: SignalShape) -> Kernel {
-        match shape { 
-            SignalShape::OneDimensional(size) => 
-                Kernel { data: vec![1.0 / size as f32; size], shape },
-            SignalShape::TwoDimensional(width, height) => 
-                Kernel { data: vec![1.0 / (width * height) as f32; width * height], shape }
+pub struct RowsIter<'a, S: Sample> {
+    data: &'a [S],
+    width: usize,
+    current_row: usize,
+    total_rows: usize
+}
+
+impl<'a, S: Sample> Iterator for RowsIter<'a, S> {
+    type Item = &'a[S];
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.current_row < self.total_rows {
+            let start = self.current_row * self.width;     
+            let end = start + self.width;
+            self.current_row += 1;
+            Some(&self.data[start..end])
+        } else {
+            None
         }
     }
 }
 
-// TODO: maybe make Signal and Kernel implementors of some trait
-#[derive(Debug)]
-pub struct Signal<S: Sample> {
-    pub shape: SignalShape,
-    pub data: Vec<S>
+pub struct RowsIterMut<'a, S: Sample> {
+    data: &'a mut [S],
+    width: usize,
+    current_row: usize,
+    total_rows: usize
 }
 
-impl<'a, S: Sample> fmt::Display for Signal<S> {
+impl<'a, S: Sample> Iterator for RowsIterMut<'a, S> {
+    type Item = &'a mut [S];
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.current_row < self.total_rows {
+            let start = self.current_row * self.width;     
+            self.current_row += 1;
+            Some(unsafe { 
+                std::slice::from_raw_parts_mut(self.data.as_mut_ptr().add(start), self.width)
+            })
+        } else {
+            None
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct Signal<S: Sample, C: AsMut<[S]> + AsRef<[S]>> {
+    pub shape: SignalShape,
+    pub data: C,
+    _phantom_t: PhantomData<S>
+}
+
+pub type Kernel = Signal<f32, Vec<f32>>;
+
+impl<'a, S: Sample, C: AsMut<[S]> + AsRef<[S]> + fmt::Debug> fmt::Display for Signal<S, C> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self.shape {
             SignalShape::OneDimensional(_) => write!(f, "{:02x?}", self.data),
             SignalShape::TwoDimensional(width, height) => {
                 for y in 0..height {
-                    write!(f, "{:02x?}\n", &self.data[(y * width)..(y * width + width)])?;
+                    write!(f, "{:02x?}\n", &self.data.as_ref().get((y * width)..(y * width + width)))?;
                 }
                 Ok(())
             }
@@ -69,8 +109,104 @@ impl<'a, S: Sample> fmt::Display for Signal<S> {
     }
 }
 
-impl<S: Sample> Signal<S> {
-    fn window(&self, center: usize, shape: SignalShape) -> Signal<S> {
+impl<'a, S: Sample, DataContainer: AsMut<[S]> + AsRef<[S]>> Signal<S, DataContainer> {
+    pub fn new(shape: SignalShape, data_container: DataContainer) -> Self {
+        Signal {
+            shape, 
+            data: data_container, 
+            _phantom_t: PhantomData
+        }
+    }
+
+    pub fn iter_rows(&'a self) -> RowsIter<'a, S> {
+        match self.shape {
+            SignalShape::OneDimensional(length) => {
+                RowsIter {
+                    data: &self.data.as_ref(),
+                    width: length,
+                    current_row: 0,
+                    total_rows: 1
+                }
+            }
+            SignalShape::TwoDimensional(width, height) => {
+                RowsIter {
+                    data: &self.data.as_ref(),
+                    width,
+                    current_row: 0,
+                    total_rows: height
+                }
+            }
+        }
+    }
+
+    pub fn iter_rows_mut(&'a mut self) -> RowsIterMut<'a, S> {
+        match self.shape {
+            SignalShape::OneDimensional(length) => {
+                RowsIterMut {
+                    data: self.data.as_mut(),
+                    width: length,
+                    current_row: 0,
+                    total_rows: 1
+                }
+            }
+            SignalShape::TwoDimensional(width, height) => {
+                RowsIterMut {
+                    data: self.data.as_mut(),
+                    width,
+                    current_row: 0,
+                    total_rows: height
+                }
+            }
+        }
+    }
+
+    fn _window<W>(&self, center: usize, window: &mut Signal<S, W>)
+    where
+        W: AsRef<[S]> + AsMut<[S]>
+    {
+        match self.shape {
+            SignalShape::OneDimensional(signal_length) => {
+                let c = center as isize;
+                let r = window.shape.radius() as isize;
+                let mut wi = 0;
+                let mut fi: usize;
+                for i in c - r ..= c + r {
+                    if i < 0 { fi = 0 }
+                    else if i as usize >= signal_length { fi = signal_length - 1 }
+                    else { fi = i as usize }
+                    window.data.as_mut()[wi] = self.data.as_ref()[fi];
+                    wi += 1;
+                }
+            }
+            SignalShape::TwoDimensional(width, height) => {
+                let c = center as isize;
+                let yc = (c as usize / width) as isize;
+                let xc = (c as usize % width) as isize;
+                let r = window.shape.radius() as isize;
+                let mut wi = 0;
+                let mut fy: usize;
+                let mut fx: usize;
+                for y in yc - r ..= yc + r {
+                    for x in xc - r ..= xc + r {
+                        if y < 0                     { fy = 0 }
+                        else if y as usize >= height { fy = height - 1 }
+                        else                         { fy = y as usize }
+
+                        if x < 0                    { fx = 0 }
+                        else if x as usize >= width { fx = width - 1 }
+                        else                        { fx = x as usize }
+
+                        let i = (fy * width) + fx;
+
+                        window.data.as_mut()[wi] = self.data.as_ref()[i];
+                        wi += 1;
+                    }
+                }
+            }
+        }
+    }
+
+    fn window(&self, center: usize, shape: SignalShape) -> Signal<S, Vec<S>> {
         let mut output = Vec::<S>::new();
        
         match self.shape {
@@ -82,7 +218,7 @@ impl<S: Sample> Signal<S> {
                     if i < 0 { fi = 0 }
                     else if i as usize >= signal_length { fi = signal_length - 1 }
                     else { fi = i as usize }
-                    output.push(self.data[fi]);
+                    output.push(self.data.as_ref()[fi]);
                 }
             }
             SignalShape::TwoDimensional(width, height) => {
@@ -104,29 +240,112 @@ impl<S: Sample> Signal<S> {
 
                         let i = (fy * width) + fx;
 
-                        output.push(self.data[i]);
+                        output.push(self.data.as_ref()[i]);
                     }
                 }
             }
         }
-        Signal {
-            shape,
-            data: output
+        Signal::new(shape, output)
+    }
+
+    pub fn filter_in_place(&mut self, kernel: &Kernel) {
+        let mut window = Signal::new(kernel.shape, Vec::<S>::with_capacity(kernel.data.len()));
+
+        // SAFETY: self._window is guaranteed initialize the full vec
+        // (in the future anyway, right now this is not safe lol)
+        unsafe { window.data.set_len(kernel.data.len()) }
+
+        for i in 0..self.data.as_ref().len() {
+            self._window(i, &mut window);
+            let sample = S::convolve(&window.data, &kernel.data);
+            self.data.as_mut()[i] = sample;
         }
     }
 
-    pub fn filter(&self, kernel: &Kernel) -> Signal<S> {
+    pub fn filter(&self, kernel: &Kernel) -> Signal<S, Vec<S>> {
         let mut output = Vec::<S>::new();
-        for i in 0..self.data.len() {
+        for i in 0..self.data.as_ref().len() {
             let sample = S::convolve(
                 self.window(i, kernel.shape).data.as_slice(), 
                 kernel.data.as_slice());
             output.push(sample);
         }
-        Signal { shape: self.shape, data: output }
+        Signal::new(kernel.shape, output)
     }
 
-    pub fn resample(&self, scale: f32, sampling_method: SamplingMethod) -> Signal<S> {
+    pub fn _resample(&self, scale: f32, sampling_method: SamplingMethod, output: &mut Signal<S, Vec<S>>) {
+        output.data.clear();
+        match self.shape {
+            SignalShape::OneDimensional(length) => {
+                // TODO: is this correct? Should we leave it at 0?
+                let mut x = if scale > 1f32 { 0.5 } else { 0.0 };
+                let step = 1.0 / scale;
+
+                while x < length as f32 {
+                    match sampling_method {
+                        SamplingMethod::Point => {
+                            if x == 0.0 {
+                                output.data.push(self.data.as_ref()[x as usize]);
+                            } else if x >= length as f32 {
+                                output.data.push(self.data.as_ref()[length - 1]) 
+                            } else {
+                                output.data.push(self.data.as_ref()[x as usize]);
+                            }
+                        }
+                        SamplingMethod::Linear => {
+                            let x1 = x as usize;
+                            let y;
+                            if x >= (self.data.as_ref().len() - 1) as f32 {
+                                // linear extrapolation
+                                let x0 = (x - 1.0) as usize;
+                                let preceeding_val = linear_interpolate(x0 as f32, &self.data.as_ref()[x0], x1 as f32, &self.data.as_ref()[x1], x);
+                                let inc = self.data.as_ref()[x1].sub(preceeding_val);
+                                y = self.data.as_ref()[x1].sub(inc);
+                            } else {
+                                let x2 = (x + 1.0) as usize;
+                                y = linear_interpolate(x1 as f32, &self.data.as_ref()[x1], x2 as f32, &self.data.as_ref()[x2], x);
+                            }
+                            output.data.push(y);
+                        }
+                        _ => panic!("unsupported sampling method")
+                    }
+                    x += step;
+                }
+                output.shape = SignalShape::OneDimensional(output.data.len());
+            }
+            SignalShape::TwoDimensional(width, height) => {
+                let new_width  = (width as f32 * scale) as usize;
+                let new_height = (height as f32 * scale) as usize;
+                match sampling_method {
+                    SamplingMethod::Bilinear => {
+                        for dy in 0..new_height {
+                            let sy = (dy as f32 / (new_height - 1) as f32 ) * (height - 1) as f32;
+
+                            // TODO: avoid ceil() call here
+                            if sy.ceil() >= height as f32 { break }
+
+                            for dx in 0..new_width {
+                                let sx = (dx as f32 / (new_width - 1) as f32 ) * (width - 1) as f32;
+                                let (x1, x2, y1, y2) = bilinear_interpolate_get_neighbors(sx, sy);
+
+                                let q11 = self.data.as_ref()[x1 + (y1 * width)];
+                                let q21 = self.data.as_ref()[x2 + (y1 * width)];
+                                let q12 = self.data.as_ref()[x1 + (y2 * width)];
+                                let q22 = self.data.as_ref()[x2 + (y2 * width)];
+                                let p = bilinear_interpolate(x1 as f32, y1 as f32, x2 as f32, y2 as f32, &q11, &q21, &q12, &q22, sx, sy);
+
+                                output.data.push(p);
+                            }
+                        }
+                    }
+                    _ => panic!("unsupported sampling method")
+                }
+                output.shape = SignalShape::TwoDimensional(new_width, new_height);
+            }
+        }
+    }
+
+    pub fn resample(&self, scale: f32, sampling_method: SamplingMethod) -> Signal<S, Vec<S>> {
         match self.shape {
             SignalShape::OneDimensional(length) => {
                 // TODO: is this correct? Should we leave it at 0?
@@ -165,25 +384,25 @@ impl<S: Sample> Signal<S> {
                     match sampling_method {
                         SamplingMethod::Point => {
                             if x == 0.0 {
-                                sampled_data.push(self.data[x as usize]);
+                                sampled_data.push(self.data.as_ref()[x as usize]);
                             } else if x >= length as f32 {
-                                sampled_data.push(self.data[length - 1]) 
+                                sampled_data.push(self.data.as_ref()[length - 1]) 
                             } else {
-                                sampled_data.push(self.data[x.floor() as usize]);
+                                sampled_data.push(self.data.as_ref()[x as usize]);
                             }
                         }
                         SamplingMethod::Linear => {
-                            let x1 = x.floor() as usize;
+                            let x1 = x as usize;
                             let y;
-                            if x >= (self.data.len() - 1) as f32 {
+                            if x >= (self.data.as_ref().len() - 1) as f32 {
                                 // linear extrapolation
-                                let x0 = (x - 1.0).floor() as usize;
-                                let preceeding_val = linear_interpolate(x0 as f32, &self.data[x0], x1 as f32, &self.data[x1], x);
-                                let inc = self.data[x1].sub(preceeding_val);
-                                y = self.data[x1].sub(inc);
+                                let x0 = (x - 1.0) as usize;
+                                let preceeding_val = linear_interpolate(x0 as f32, &self.data.as_ref()[x0], x1 as f32, &self.data.as_ref()[x1], x);
+                                let inc = self.data.as_ref()[x1].sub(preceeding_val);
+                                y = self.data.as_ref()[x1].sub(inc);
                             } else {
-                                let x2 = (x + 1.0).floor() as usize;
-                                y = linear_interpolate(x1 as f32, &self.data[x1], x2 as f32, &self.data[x2], x);
+                                let x2 = (x + 1.0) as usize;
+                                y = linear_interpolate(x1 as f32, &self.data.as_ref()[x1], x2 as f32, &self.data.as_ref()[x2], x);
                             }
                             sampled_data.push(y);
                         }
@@ -192,7 +411,7 @@ impl<S: Sample> Signal<S> {
                     x += step;
                 }
                 let new_length = sampled_data.len();
-                Signal { data: sampled_data, shape: SignalShape::OneDimensional(new_length) }
+                Signal::new(SignalShape::OneDimensional(new_length), sampled_data)
             }
             SignalShape::TwoDimensional(width, height) => {
                 let new_width  = (width as f32 * scale) as usize;
@@ -202,6 +421,8 @@ impl<S: Sample> Signal<S> {
                     SamplingMethod::Bilinear => {
                         for dy in 0..new_height {
                             let sy = (dy as f32 / (new_height - 1) as f32 ) * (height - 1) as f32;
+
+                            // TODO: avoid ceil() call here
                             if sy.ceil() >= height as f32 { break }
 
                             for dx in 0..new_width {
@@ -214,10 +435,10 @@ impl<S: Sample> Signal<S> {
                                 // should be supported though...
                                 // on the other hand, window currently instantiates a new object
                                 // and this is less heavy
-                                let q11 = self.data[x1 + (y1 * width)];
-                                let q21 = self.data[x2 + (y1 * width)];
-                                let q12 = self.data[x1 + (y2 * width)];
-                                let q22 = self.data[x2 + (y2 * width)];
+                                let q11 = self.data.as_ref()[x1 + (y1 * width)];
+                                let q21 = self.data.as_ref()[x2 + (y1 * width)];
+                                let q12 = self.data.as_ref()[x1 + (y2 * width)];
+                                let q22 = self.data.as_ref()[x2 + (y2 * width)];
                                 let p = bilinear_interpolate(x1 as f32, y1 as f32, x2 as f32, y2 as f32, &q11, &q21, &q12, &q22, sx, sy);
 
                                 sampled.push(p);
@@ -227,7 +448,7 @@ impl<S: Sample> Signal<S> {
                     _ => panic!("unsupported sampling method")
                 }
 
-                Signal { data: sampled, shape: SignalShape::TwoDimensional(new_width, new_height) }
+                Signal::new(SignalShape::TwoDimensional(new_width, new_height), sampled)
             }
         }
     }
@@ -240,13 +461,10 @@ pub fn moving_average_kernel(radius: usize) -> Vec<f32> {
     vec![1.0 / (radius * 2 + 1) as f32; radius * 2 + 1]
 }
 
-pub fn moving_average_kernel_new(radius: usize) -> Kernel {
+pub fn moving_average_kernel_new2(radius: usize) -> Kernel {
     let size = radius * 2 + 1;
     let data = vec![1.0 / (radius * 2 + 1) as f32; radius * 2 + 1];
-    Kernel {
-        data,
-        shape: SignalShape::OneDimensional(size)
-    }
+    Signal::new(SignalShape::OneDimensional(size), data)
 }
 
 pub fn moving_avg_kernel_unsized(kernel: &mut Kernel) {
@@ -288,5 +506,6 @@ pub fn bilinear_interpolate<S: Sample>(
 }
 
 fn bilinear_interpolate_get_neighbors(x: f32, y: f32) -> (usize, usize, usize, usize) {
-    (x.floor() as usize, x.ceil() as usize, y.floor() as usize, y.ceil() as usize)
+    // TODO: can we avoid using ceil() here? It's slower than casting
+    (x as usize, x.ceil() as usize, y as usize, y.ceil() as usize)
 }

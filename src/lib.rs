@@ -7,6 +7,9 @@ pub mod signal;
 pub mod ntsc;
 
 impl Sample for u8 {
+    fn to_f32(&self) -> f32 {
+        *self as f32
+    }
     fn scale_f32(&self, scalar: f32) -> Self {
         (*self as f32 * scalar) as Self
     }
@@ -16,12 +19,18 @@ impl Sample for u8 {
     fn sub(&self, other: Self) -> Self {
         self.saturating_sub(other)
     }
+    fn depth(&self) -> usize {
+        return 1;
+    }
     fn zero() -> Self {
         return 0u8;
     }
 }
 
 impl Sample for f32 {
+    fn to_f32(&self) -> f32 {
+        *self
+    }
     fn scale_f32(&self, scalar: f32) -> Self {
         *self * scalar
     }
@@ -31,12 +40,18 @@ impl Sample for f32 {
     fn sub(&self, other: Self) -> Self {
         self - other    
     }
+    fn depth(&self) -> usize {
+        return 1;
+    }
     fn zero() -> Self {
         return 0f32;
     }
 }
 
 impl Sample for image::Luma<u8> {
+    fn to_f32(&self) -> f32 {
+        self.0[0] as f32
+    }
     fn scale_f32(&self, scalar: f32) -> Self {
         image::Luma([(self.0[0] as f32 * scalar) as u8])
     }
@@ -46,12 +61,18 @@ impl Sample for image::Luma<u8> {
     fn sub(&self, other: Self) -> Self {
         image::Luma([self.0[0].saturating_sub(other.0[0])])
     }
+    fn depth(&self) -> usize {
+        return 1;
+    }
     fn zero() -> Self {
         image::Luma([0u8])
     }
 }
     
 impl Sample for Rgb<u8> {
+    fn to_f32(&self) -> f32 {
+        self.0[0] as f32
+    }
     fn scale_f32(&self, scalar: f32) -> Self {
         let r = (self.0[0] as f32 * scalar) as u8;
         let g = (self.0[1] as f32 * scalar) as u8;
@@ -70,6 +91,9 @@ impl Sample for Rgb<u8> {
         let b = self.0[2].saturating_sub(other.0[2]);
         Rgb([r, g, b])
     }
+    fn depth(&self) -> usize {
+        return 3;
+    }
     fn zero() -> Self {
         Rgb([0u8, 0u8, 0u8])
     }
@@ -84,8 +108,8 @@ mod tests {
 
 
     use crate::signal::{ 
-        Kernel, 
         Signal, 
+        Kernel,
         SignalShape, 
         moving_average_kernel, 
         SamplingMethod, 
@@ -97,24 +121,23 @@ mod tests {
 
     #[test]
     fn it_filters_image() {
-        let gaussian_kernel = Kernel { 
-            data: vec![ 0.0318, 0.0375, 0.0397, 0.0375, 0.0318,
+        let gaussian_kernel = Kernel::new(
+            SignalShape::TwoDimensional(5, 5),
+            vec![ 0.0318, 0.0375, 0.0397, 0.0375, 0.0318,
                         0.0375, 0.0443, 0.0468, 0.0443, 0.0375,
                         0.0397, 0.0468, 0.0494, 0.0468, 0.0397,
                         0.0375, 0.0443, 0.0468, 0.0443, 0.0375,
-                        0.0318, 0.0375, 0.0397, 0.0375, 0.0318 ],
-            shape: SignalShape::TwoDimensional(5, 5)
-        };
-        // let kernel = Kernel::moving_average(SignalShape::TwoDimensional(5, 5));
+                        0.0318, 0.0375, 0.0397, 0.0375, 0.0318 ]
+        );
 
         let filename = "/home/sen/Projects/RS170/PM5644.png";
         let img_ = ImageReader::open(filename).unwrap().decode().unwrap();
         let img = img_.to_rgb8();
 
-        let signal = Signal {
-            data: img.enumerate_pixels().map(|(_, _, pixel)| *pixel).collect::<Vec<Rgb<u8>>>(),
-            shape: SignalShape::TwoDimensional(img.width() as usize, img.height() as usize)
-        };
+        let signal = Signal::new(
+            SignalShape::TwoDimensional(img.width() as usize, img.height() as usize),
+            img.enumerate_pixels().map(|(_, _, pixel)| *pixel).collect::<Vec<Rgb<u8>>>()
+        );
 
         let filtered = signal.filter(&gaussian_kernel);
 
@@ -211,42 +234,31 @@ mod tests {
         let filename = "/home/sen/Projects/RS170/PM5644.png";
         let img_ = ImageReader::open(filename).unwrap().decode().unwrap();
         let img = img_.to_rgb8();
+
         for _ in 0..30 {
             let pixels = img.enumerate_pixels().map(|(_, _, pixel)| *pixel).collect::<Vec<Rgb<u8>>>();
 
             let (cropped_width, cropped_height, pixels) = 
                 crop_for_ntsc(&pixels, img.width() as usize, img.height() as usize);
 
-            let signal = Signal {
-                data: pixels,
-                shape: SignalShape::TwoDimensional(cropped_width, cropped_height)
-            };
+            let signal = Signal::new(SignalShape::TwoDimensional(cropped_width, cropped_height), pixels);
 
             let scale = NTSC_VISIBLE_LINE_COUNT as f32 / cropped_width as f32;
             let scaled_width = (cropped_width as f32 * scale) as u32;
             let scaled_height = (cropped_height as f32 * scale) as u32;
 
-            let scaled = signal.resample(scale, SamplingMethod::Bilinear);
-            let kernel = Kernel::moving_average(SignalShape::TwoDimensional(5, 5));
-            let filtered = scaled.filter(&kernel);
+            let mut scaled = signal.resample(scale, SamplingMethod::Bilinear);
+            let kernel = crate::signal::moving_average_kernel_new(SignalShape::TwoDimensional(5, 5));
+            crate::ntsc::horizontal_filter(&mut scaled, &kernel);
 
-            /*
-            for y in 0..scaled_height {
-                let start =  y as usize * scaled_width as usize;
-                let end = start + scaled_width as usize;
-                let mut row = Signal { data: scaled.data[start..end].to_vec(), shape: SignalShape::OneDimensional(end - start) };
-                let lpf_row = row.filter(&kernel);
-                filtered.data.append(&mut row.data);
-            }
-            */
-
-            let filtered_image = image::ImageBuffer::from_fn(
+            let _filtered_image = image::ImageBuffer::from_fn(
                 scaled_width, scaled_height, |x, y| {
                     let index = (y * scaled_width + x) as usize;
-                    filtered.data[index]
+                    scaled.data[index]
                 }
             );
-            filtered_image.save("/home/sen/Projects/RS170/ntsc_test.png").unwrap();
+
+            _filtered_image.save("/home/sen/Projects/RS170/ntsc_test.png").unwrap();
         }
     }
 
@@ -278,13 +290,13 @@ mod tests {
     fn it_filters_new_1d() {
 
         // this API sucks
-        let kernel = Kernel::moving_average(SignalShape::OneDimensional(3));
+        let kernel = crate::signal::moving_average_kernel_new(SignalShape::OneDimensional(3));
 
         let data: Vec<u8> = vec![10, 5, 10, 5, 10, 10, 10, 10, 0, 0, 0, 0, 0, 0, 0, 0];
         println!("original dat:\t{:02x?}", data);
 
         let shape = SignalShape::OneDimensional(data.len());
-        let signal = Signal { data: data.to_owned(), shape };
+        let signal = Signal::new(shape, data);
         let filtered_data = signal.filter(&kernel);
         println!("filtered new:\t{:02x?}", filtered_data.data);
 
@@ -294,7 +306,7 @@ mod tests {
         println!("original dat:\t{:02x?}", data);
 
         let shape = SignalShape::OneDimensional(data.len());
-        let signal = Signal { data, shape };
+        let signal = Signal::new(shape, data);
         let filtered_data = signal.filter(&kernel).data;
 
         println!("filtered new:\t{:02x?}", filtered_data);
@@ -302,45 +314,45 @@ mod tests {
 
     #[test]
     fn it_filters_new_2d() {
-        let kernel = Kernel::moving_average(SignalShape::TwoDimensional(3, 3));
+        let kernel = crate::signal::moving_average_kernel_new(SignalShape::TwoDimensional(3, 3));
 
-        let data = Signal {
-            data: vec![0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06,
-                       0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d,
-                       0x0e, 0x0f, 0x10, 0x11, 0x12, 0x13, 0x14,
-                       0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b,
-                       0x1c, 0x1d, 0x1e, 0x1f, 0x20, 0x21, 0x22,
-                       0x23, 0x24, 0x25, 0x26, 0x27, 0x28, 0x29,
-                       0x2a, 0x2b, 0x2c, 0x2d, 0x2e, 0x2f, 0x30],
-            shape: SignalShape::TwoDimensional(7, 7)
-        };
+        let data = Signal::<u8, Vec<u8>>::new(
+            SignalShape::TwoDimensional(7, 7),
+            vec![0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06,
+                 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d,
+                 0x0e, 0x0f, 0x10, 0x11, 0x12, 0x13, 0x14,
+                 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b,
+                 0x1c, 0x1d, 0x1e, 0x1f, 0x20, 0x21, 0x22,
+                 0x23, 0x24, 0x25, 0x26, 0x27, 0x28, 0x29,
+                 0x2a, 0x2b, 0x2c, 0x2d, 0x2e, 0x2f, 0x30]
+        );
         println!("original:\n{}", data);
-        let filtered = data.filter(&kernel);
+        let filtered: Signal<u8, Vec<u8>> = data.filter(&kernel);
         println!("filtered:\n{}", filtered);
 
-        let data = Signal {
-            data: vec![0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-                       0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-                       0x00, 0x00, 0x00, 0xff, 0x00, 0x00, 0x00,
-                       0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-                       0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00],
-            shape: SignalShape::TwoDimensional(7, 5)
-        };
+        let data = Signal::new(
+            SignalShape::TwoDimensional(7, 5),
+            vec![0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                 0x00, 0x00, 0x00, 0xff, 0x00, 0x00, 0x00,
+                 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]
+        );
         println!("original:\n{}", data);
-        let filtered = data.filter(&kernel);
+        let filtered: Signal<u8, Vec<u8>> = data.filter(&kernel);
         println!("filtered:\n{}", filtered);
 
-        let data = Signal {
-            data: vec![
+        let data = Signal::new(
+            SignalShape::TwoDimensional(6, 6),
+            vec![
                 Rgb([255,255,255]), Rgb([255,255,255]), Rgb([255,255,255]), Rgb([255,255,255]), Rgb([255,255,255]), Rgb([255,255,255]),
                 Rgb([255,255,255]), Rgb([255,255,255]), Rgb([255,255,255]), Rgb([255,255,255]), Rgb([255,255,255]), Rgb([255,255,255]),
                 Rgb([255,255,255]), Rgb([255,255,255]), Rgb([255,255,255]), Rgb([255,255,255]), Rgb([255,255,255]), Rgb([255,255,255]),
                 Rgb([255,255,255]), Rgb([255,255,255]), Rgb([255,255,255]), Rgb([255,255,255]), Rgb([255,255,255]), Rgb([255,255,255]),
                 Rgb([255,255,255]), Rgb([255,255,255]), Rgb([255,255,255]), Rgb([255,255,255]), Rgb([255,255,255]), Rgb([255,255,255]),
                 Rgb([255,255,255]), Rgb([255,255,255]), Rgb([255,255,255]), Rgb([255,255,255]), Rgb([255,255,255]), Rgb([255,255,255]),
-            ],
-            shape: SignalShape::TwoDimensional(6, 6)
-        };
+            ]
+        );
         println!("original:\n{}", data);
         let filtered = data.filter(&kernel);
         println!("filtered:\n{}", filtered);
@@ -357,26 +369,26 @@ mod tests {
 
         let pixels = img.as_mut();
 
-        let kernel = Kernel { data: moving_average_kernel(10), shape: SignalShape::OneDimensional(10) };
+        let kernel = Kernel::new(
+            SignalShape::OneDimensional(10),
+            moving_average_kernel(10)
+        );
 
         for i in 0..height {
             let row_start =  i as usize * width * 3;
             let row_end = row_start + (width * 3);
 
             let row_bytes = &mut pixels[row_start..row_end];
-            let row_pixels: &mut [Rgb<u8>] = unsafe {
+            let mut row_pixels: &mut [Rgb<u8>] = unsafe {
                 std::slice::from_raw_parts_mut(row_bytes.as_mut_ptr() as *mut Rgb<u8>, width)
             };
+
             let row_pixel_len = row_pixels.len();
 
-            let lpf_row = Signal {
-                data: row_pixels.to_vec(),
-                shape: SignalShape::OneDimensional(row_pixel_len)
-            }.filter(&kernel);
-
-            for (dst, src) in row_pixels.iter_mut().zip(lpf_row.data.iter()) {
-                *dst = *src;
-            }
+            Signal::new(
+                SignalShape::OneDimensional(row_pixel_len),
+                &mut row_pixels,
+            ).filter_in_place(&kernel);
         }
 
         img.save("/home/sen/Projects/RS170/horizontal_moving_avg.png").unwrap();
@@ -397,10 +409,10 @@ mod tests {
 
         let pixels = img.enumerate_pixels().map(|(_, _, pixel)| *pixel).collect::<Vec<Rgb<u8>>>();
 
-        let signal = Signal {
-            data: pixels.to_owned(),
-            shape: SignalShape::TwoDimensional(img.width() as usize, img.height() as usize)
-        };
+        let signal = Signal::new(
+            SignalShape::TwoDimensional(img.width() as usize, img.height() as usize),
+            pixels
+        );
 
         let sampled = signal.resample(2.0, SamplingMethod::Bilinear);
 
@@ -440,10 +452,10 @@ mod tests {
 
         let pixels = img.enumerate_pixels().map(|(_, _, pixel)| *pixel).collect::<Vec<image::Luma<u8>>>();
 
-        let signal = Signal {
-            data: pixels.to_owned(),
-            shape: SignalShape::TwoDimensional(img.width() as usize, img.height() as usize)
-        };
+        let signal = Signal::new(
+            SignalShape::TwoDimensional(img.width() as usize, img.height() as usize),
+            pixels
+        );
 
         let sampled = signal.resample(2.0, SamplingMethod::Bilinear);
 
@@ -461,7 +473,7 @@ mod tests {
     fn it_resamples_2d() {
         let shape = SignalShape::OneDimensional(10);
         let data: [u8; 10] = [0, 10, 20, 30, 40, 50, 60, 70, 80, 90];
-        let signal = Signal { data: data.to_vec(), shape };
+        let signal = Signal::new(shape, data.to_vec());
         let sampled = signal.resample(0.5, SamplingMethod::Point);
         println!("original: {:?}", signal.data);
         println!("resample: {:?}", sampled.data);
@@ -481,26 +493,29 @@ mod tests {
         println!("original: {:?}", signal.data);
         println!("resample: {:?}", sampled.data);
 
-        let signal = Signal { 
-            data: vec![1, 3, 5, 7, 9, 11, 13], 
-            shape: SignalShape::OneDimensional(7) 
-        };
+        let signal = Signal::new(
+            SignalShape::OneDimensional(7),
+            vec![1, 3, 5, 7, 9, 11, 13]
+        );
+
         let sampled = signal.resample(2.0, SamplingMethod::Linear);
         println!("original: {:?}", signal.data);
         println!("resample: {:?}", sampled.data);
 
-        let signal = Signal { 
-            data: vec![1, 1, 90, 2, 100, 22, 13, 1],
-            shape: SignalShape::OneDimensional(8) 
-        };
+        let signal = Signal::new(
+            SignalShape::OneDimensional(7),
+            vec![1, 1, 90, 2, 100, 22, 13, 1]
+        );
+
         let sampled = signal.resample(2.0, SamplingMethod::Linear);
         println!("original: {:?}", signal.data);
         println!("resample: {:?}", sampled.data);
 
-        let signal = Signal { 
-            data: vec![1, 1, 90, 2, 100, 22, 13, 1],
-            shape: SignalShape::OneDimensional(8) 
-        };
+        let signal = Signal::new(
+            SignalShape::OneDimensional(7),
+            vec![1, 1, 90, 2, 100, 22, 13, 1]
+        );
+
         let sampled = signal.resample(0.732, SamplingMethod::Linear);
         println!("original: {:?}", signal.data);
         println!("resample: {:?}", sampled.data);
@@ -508,24 +523,74 @@ mod tests {
         let mut f = File::open("/home/sen/Projects/RS170/sine_wave_u8.bin").unwrap();
         let mut data = Vec::<u8>::new();
         f.read_to_end(&mut data).unwrap();
-        let dlen = data.len();
-        let signal = Signal {
-            data: data.to_owned(), 
-            shape: SignalShape::OneDimensional(dlen)
-        };
+
+        let signal = Signal::new(
+            SignalShape::OneDimensional(data.len()),
+            &mut data
+        );
+
         let sampled = signal.resample(0.5, SamplingMethod::Linear);
         let mut f2 = File::create("/home/sen/Projects/RS170/sine_wave_downscaled_0.5.bin").unwrap();
         f2.write_all(sampled.data.as_slice()).unwrap();
 
-
-        let dlen = data.len();
-        let signal = Signal {
-            data: data.to_owned(), 
-            shape: SignalShape::OneDimensional(dlen)
-        };
+        let signal = Signal::new(
+            SignalShape::OneDimensional(data.len()),
+            &mut data
+        );
         let sampled = signal.resample(5.0, SamplingMethod::Linear);
         let mut f2 = File::create("/home/sen/Projects/RS170/sine_wave_upscaled_5.bin").unwrap();
         f2.write_all(sampled.data.as_slice()).unwrap();
+    }
+
+    #[test]
+    fn it_resamples_3d() {
+        let data = Signal::new(
+            SignalShape::TwoDimensional(7, 7),
+            vec![0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06,
+                 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d,
+                 0x0e, 0x0f, 0x10, 0x11, 0x12, 0x13, 0x14,
+                 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b,
+                 0x1c, 0x1d, 0x1e, 0x1f, 0x20, 0x21, 0x22,
+                 0x23, 0x24, 0x25, 0x26, 0x27, 0x28, 0x29,
+                 0x2a, 0x2b, 0x2c, 0x2d, 0x2e, 0x2f, 0x30],
+        );
+
+        println!("original:\n{}", data);
+        let sampled = data.resample(0.5, SamplingMethod::Bilinear);
+        println!("sampled :\n{}", sampled);
+        let sampled = data.resample(2.0, SamplingMethod::Bilinear);
+        println!("sampled :\n{}", sampled);
+
+        let data = Signal::new(
+            SignalShape::TwoDimensional(7, 5),
+            vec![0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                 0x00, 0x00, 0x00, 0xff, 0x00, 0x00, 0x00,
+                 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]
+        );
+        println!("original:\n{}", data);
+        let sampled = data.resample(0.5, SamplingMethod::Bilinear);
+        println!("sampled :\n{}", sampled);
+        let sampled = data.resample(2.0, SamplingMethod::Bilinear);
+        println!("sampled :\n{}", sampled);
+
+        let data = Signal::new(
+            SignalShape::TwoDimensional(6, 6),
+            vec![
+                Rgb([255,255,255]), Rgb([255,255,255]), Rgb([255,255,255]), Rgb([255,255,255]), Rgb([255,255,255]), Rgb([255,255,255]),
+                Rgb([255,255,255]), Rgb([255,255,255]), Rgb([255,255,255]), Rgb([255,255,255]), Rgb([255,255,255]), Rgb([255,255,255]),
+                Rgb([255,255,255]), Rgb([255,255,255]), Rgb([255,255,255]), Rgb([255,255,255]), Rgb([255,255,255]), Rgb([255,255,255]),
+                Rgb([255,255,255]), Rgb([255,255,255]), Rgb([255,255,255]), Rgb([255,255,255]), Rgb([255,255,255]), Rgb([255,255,255]),
+                Rgb([255,255,255]), Rgb([255,255,255]), Rgb([255,255,255]), Rgb([255,255,255]), Rgb([255,255,255]), Rgb([255,255,255]),
+                Rgb([255,255,255]), Rgb([255,255,255]), Rgb([255,255,255]), Rgb([255,255,255]), Rgb([255,255,255]), Rgb([255,255,255]),
+            ]
+        );
+        println!("original:\n{}", data);
+        let sampled = data.resample(0.5, SamplingMethod::Bilinear);
+        println!("sampled :\n{}", sampled);
+        let sampled = data.resample(2.0, SamplingMethod::Bilinear);
+        println!("sampled :\n{}", sampled);
     }
 
     struct Point {

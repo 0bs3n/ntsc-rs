@@ -21,7 +21,21 @@ const NTSC_H_ACTIVE_VIDEO: f32 = 52.6;
 // const SAMPLE_RATE_HZ: usize = 10_046_600;
 // const SAMPLE_PER_LINE_ACTIVE_VIDEO: usize = 191000;
 
-fn _frame_to_signal<S: Sample>(frame: Signal<S>) {
+pub fn horizontal_filter<S: Sample, C: AsRef<[S]> + AsMut<[S]>>(frame: &mut Signal<S, C>, kernel: &Kernel) {
+    println!("in horizontal_filter");
+    let width = if let SignalShape::TwoDimensional(width, _) = frame.shape {
+        width
+    } else {
+        panic!("ntsc frames aren't 1D");
+    };
+
+    for (i, row) in frame.iter_rows_mut().enumerate() {
+        println!("i: {}", i);
+        Signal::new(SignalShape::OneDimensional(width), row).filter_in_place(&kernel);
+    }
+}
+
+fn _frame_to_signal<S: Sample, C: AsRef<[S]> + AsMut<[S]>>(frame: Signal<S, C>) {
     // for each other line in frame (split even/odd fields)
     // sample line data at appropriate sample rate (assuming a certain transmit rate)
     // convert each sample to IRE value (or voltage? implicit conversion?)
@@ -40,11 +54,11 @@ fn _frame_to_signal<S: Sample>(frame: Signal<S>) {
     // iterate lines
     // don't forget to fix this for fields, should be every other line, then back up top, then the
     // rest
-    for line in frame.data.chunks(width) {
-        let _line = Signal { 
-            data: line.to_vec(), 
-            shape: SignalShape::OneDimensional(width) 
-        };
+    // for line in frame.data.chunks(width) {
+        // let _line = Signal { 
+            // data: line.to_vec(), 
+            // shape: SignalShape::OneDimensional(width) 
+        // };
 
         // scale the values in the line from S to f32 (or whatever will work best with libbladerf)
         // within the range -285.7mv to +714.3mv
@@ -56,7 +70,7 @@ fn _frame_to_signal<S: Sample>(frame: Signal<S>) {
 
         // append front porch, sync, breezeway/colorburst, back porch to line
         // push line data to frame signal
-    }
+    // }
 }
 
 /*
@@ -96,26 +110,14 @@ pub fn ntsc_process_frame<S: image::Pixel + Sample>(pixels: &[S], width: usize, 
     let scaled_width = (cropped_width as f32 * scale) as usize;
     let scaled_height = (cropped_height as f32 * scale) as usize;
 
-    let mut scaled = Signal {
-        data: pixels,
-        shape: SignalShape::TwoDimensional(cropped_width, cropped_height)
-    }.resample(scale, SamplingMethod::Bilinear);
+    let mut scaled = Signal::new(
+        SignalShape::TwoDimensional(cropped_width, cropped_height),
+        pixels
+    ).resample(scale, SamplingMethod::Bilinear);
 
-    let kernel = Kernel {
-        data: moving_average_kernel(3),
-        shape: SignalShape::OneDimensional(7)
-    };
+    let kernel = Kernel::new(SignalShape::OneDimensional(7), moving_average_kernel(3));
 
-    for y in 0..scaled_height {
-        let start =  y as usize * scaled_width;
-        let end = start + scaled_width;
-        let row = &mut scaled.data[start..end];
-        let lpf_row = Signal { data: row.to_vec(), shape: SignalShape::OneDimensional(scaled_width) };
-        let lpf_row = lpf_row.filter(&kernel).data;
-        for (dst, src) in row.iter_mut().zip(lpf_row.iter()) {
-            *dst = *src;
-        }
-    }
+    horizontal_filter(&mut scaled, &kernel);
 
     (scaled_width, scaled_height, scaled.data)
 }
