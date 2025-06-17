@@ -4,4 +4,6 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+float-cmp = "0.10.0"
 image = "0.25.6"
+wide = "0.7.32"

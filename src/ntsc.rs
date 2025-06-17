@@ -21,7 +21,8 @@ const NTSC_H_ACTIVE_VIDEO: f32 = 52.6;
 // const SAMPLE_RATE_HZ: usize = 10_046_600;
 // const SAMPLE_PER_LINE_ACTIVE_VIDEO: usize = 191000;
 
-pub fn horizontal_filter<S: Sample, C: AsRef<[S]> + AsMut<[S]>>(frame: &mut Signal<S, C>, kernel: &Kernel) {
+pub fn horizontal_filter<C: AsRef<[f32]> + AsMut<[f32]>>(frame: &mut Signal<C>, kernel: Kernel) {
+    let kernel = frame.expand_kernel(kernel);
     println!("in horizontal_filter");
     let width = if let SignalShape::TwoDimensional(width, _) = frame.shape {
         width
@@ -29,13 +30,13 @@ pub fn horizontal_filter<S: Sample, C: AsRef<[S]> + AsMut<[S]>>(frame: &mut Sign
         panic!("ntsc frames aren't 1D");
     };
 
-    for (i, row) in frame.iter_rows_mut().enumerate() {
-        println!("i: {}", i);
-        Signal::new(SignalShape::OneDimensional(width), row).filter_in_place(&kernel);
+    let depth = frame.sample_depth;
+    for row in frame.iter_rows_mut() {
+        Signal::<&mut [f32]>::new(SignalShape::OneDimensional(width), depth, row).filter_in_place::<&mut [f32]>(&kernel);
     }
 }
 
-fn _frame_to_signal<S: Sample, C: AsRef<[S]> + AsMut<[S]>>(frame: Signal<S, C>) {
+fn _frame_to_signal<C: AsRef<[f32]> + AsMut<[f32]>>(frame: Signal<C>) {
     // for each other line in frame (split even/odd fields)
     // sample line data at appropriate sample rate (assuming a certain transmit rate)
     // convert each sample to IRE value (or voltage? implicit conversion?)
@@ -101,7 +102,8 @@ pub fn crop_for_ntsc<S: Clone>(data: &[S], width: usize, height: usize) -> (usiz
     crop_symmetric_2d(data, width, height, cp)
 }
 
-pub fn ntsc_process_frame<S: image::Pixel + Sample>(pixels: &[S], width: usize, height: usize) -> (usize, usize, Vec<S>) {
+/*
+pub fn ntsc_process_frame<S: image::Pixel + Sample>(pixels: &mut [S], width: usize, height: usize) -> (usize, usize, Vec<S>) {
     let (cropped_width, cropped_height, pixels) = 
         crop_for_ntsc(&pixels, width as usize, height as usize);
 
@@ -112,8 +114,10 @@ pub fn ntsc_process_frame<S: image::Pixel + Sample>(pixels: &[S], width: usize, 
 
     let mut scaled = Signal::new(
         SignalShape::TwoDimensional(cropped_width, cropped_height),
-        pixels
-    ).resample(scale, SamplingMethod::Bilinear);
+        S::depth(),
+        &mut pixels
+    )
+    let scaled = scaled.resample(scale, SamplingMethod::Bilinear);
 
     let kernel = Kernel::new(SignalShape::OneDimensional(7), moving_average_kernel(3));
 
@@ -121,3 +125,4 @@ pub fn ntsc_process_frame<S: image::Pixel + Sample>(pixels: &[S], width: usize, 
 
     (scaled_width, scaled_height, scaled.data)
 }
+*/

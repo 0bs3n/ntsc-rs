@@ -1,4 +1,5 @@
 use std::fmt::Debug;
+use crate::signal::Signal;
 
 pub fn linear_interpolate<S: Sample>(
     x1: f32, y1: &S, 
@@ -30,20 +31,27 @@ pub trait Sample: Debug + Copy {
     fn scale_f32(&self, scalar: f32) -> Self;
     fn add(&self, other: Self) -> Self;
     fn sub(&self, other: Self) -> Self;
-    fn depth() -> usize;
-    fn to_f32(&self) -> f32;
-    fn zero() -> Self;
-    fn simd_from_slice(samples: &[Self]) -> Vec<f32> {
-        let mut output = Vec::<f32>::new();
-        for i in 0..samples.len() * Self::depth() {
-
-        }
+    fn flatten_and_push(&self, out: &mut Vec<f32>);
+    fn flatten(samples: &[Self]) -> Vec<f32> {
+        let mut out = Vec::<f32>::new();
         for sample in samples {
-            for 
-            output.push(sample.to_f32());
+            sample.flatten_and_push(&mut out);
         }
-        output
+        out
     }
+    fn from_signal_slice(s: &[f32]) -> Self;
+    fn unflatten<C: AsRef<[f32]> + AsMut<[f32]>>(signal: &Signal<C>) -> Vec<Self> {
+        let mut out = Vec::<Self>::new();
+        for i in (0..signal.data.as_ref().len()).step_by(signal.sample_depth) {
+            // println!("flat slice: {:?}", &signal.data.as_ref()[i..i + signal.sample_depth]);
+            let unflattened = Self::from_signal_slice(&signal.data.as_ref()[i..i + signal.sample_depth]);
+            // println!("unflattened: {:?}", unflattened);
+            out.push(unflattened);
+        }
+        out
+    }
+    fn depth() -> usize;
+    fn zero() -> Self;
     fn convolve(window: &[Self], kernel: &[f32]) -> Self {
         let mut sum = Self::zero();
         for i in 0..window.len() {
