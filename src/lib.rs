@@ -19,7 +19,7 @@ impl Sample for u8 {
     fn sub(&self, other: Self) -> Self {
         self.saturating_sub(other)
     }
-    fn depth(&self) -> usize {
+    fn depth() -> usize {
         return 1;
     }
     fn zero() -> Self {
@@ -40,7 +40,7 @@ impl Sample for f32 {
     fn sub(&self, other: Self) -> Self {
         self - other    
     }
-    fn depth(&self) -> usize {
+    fn depth() -> usize {
         return 1;
     }
     fn zero() -> Self {
@@ -61,7 +61,7 @@ impl Sample for image::Luma<u8> {
     fn sub(&self, other: Self) -> Self {
         image::Luma([self.0[0].saturating_sub(other.0[0])])
     }
-    fn depth(&self) -> usize {
+    fn depth() -> usize {
         return 1;
     }
     fn zero() -> Self {
@@ -91,7 +91,7 @@ impl Sample for Rgb<u8> {
         let b = self.0[2].saturating_sub(other.0[2]);
         Rgb([r, g, b])
     }
-    fn depth(&self) -> usize {
+    fn depth() -> usize {
         return 3;
     }
     fn zero() -> Self {
@@ -258,7 +258,7 @@ mod tests {
                 }
             );
 
-            _filtered_image.save("/home/sen/Projects/RS170/ntsc_test.png").unwrap();
+            // _filtered_image.save("/home/sen/Projects/RS170/ntsc_test.png").unwrap();
         }
     }
 

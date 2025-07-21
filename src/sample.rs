@@ -39,7 +39,6 @@ pub trait Sample: Debug + Copy {
 
         }
         for sample in samples {
-            for 
             output.push(sample.to_f32());
         }
         output
