@@ -1,6 +1,36 @@
-use std::fmt;
-use std::marker::PhantomData;
+use std::{fmt};
+use num::complex::Complex64;
+use num::Complex;
+use std::f64::consts::PI;
+
 use crate::sample::Sample;
+
+impl Sample for num::complex::Complex64 {
+    fn add(&self, other: Self) -> Self {
+        self + other
+    }
+    fn depth() -> usize {
+        1
+    }
+    fn scale_f32(&self, scalar: f32) -> Self {
+        self * Complex::new(scalar as f64, 0.0)
+    }
+    fn sub(&self, other: Self) -> Self {
+        self - other
+    }
+    fn to_complex(&self) -> num::complex::Complex64 {
+        *self
+    }
+    fn to_f32(&self) -> f32 {
+        unimplemented!()
+    }
+    fn zero() -> Self {
+        Complex::new(0.0, 0.0)
+    }
+    fn magnitude(&self) -> f32 {
+        (self.re.powi(2) + self.im.powi(2)).sqrt() as f32
+    }
+}
 
 pub enum SamplingMethod {
     Point,
@@ -17,14 +47,6 @@ pub enum SignalShape {
 }
 
 impl SignalShape {
-    /*
-    fn len(&self) -> usize {
-        match self {
-            SignalShape::OneDimensional(length) => *length,
-            SignalShape::TwoDimensional(width, height) => width * height
-        }
-    }
-    */
     fn radius(&self) -> usize {
         match self {
             SignalShape::OneDimensional(length) => (length - 1) / 2,
@@ -37,9 +59,9 @@ impl SignalShape {
 pub fn moving_average_kernel_new(shape: SignalShape) -> Kernel {
     match shape { 
         SignalShape::OneDimensional(size) => 
-            Signal::new(shape, vec![1.0 / size as f32; size]),
+            Signal::with_data(shape, vec![1.0 / size as f32; size]),
         SignalShape::TwoDimensional(width, height) => 
-            Signal::new(shape, vec![1.0 / (width * height) as f32; width * height])
+            Signal::with_data(shape, vec![1.0 / (width * height) as f32; width * height])
     }
 }
 
@@ -87,21 +109,20 @@ impl<'a, S: Sample> Iterator for RowsIterMut<'a, S> {
 }
 
 #[derive(Debug)]
-pub struct Signal<S: Sample, C: AsMut<[S]> + AsRef<[S]>> {
+pub struct Signal<S: Sample> {
     pub shape: SignalShape,
-    pub data: C,
-    _phantom_t: PhantomData<S>
+    pub data: Vec<S>
 }
 
-pub type Kernel = Signal<f32, Vec<f32>>;
+pub type Kernel = Signal<f32>;
 
-impl<'a, S: Sample, C: AsMut<[S]> + AsRef<[S]> + fmt::Debug> fmt::Display for Signal<S, C> {
+impl<'a, S: Sample + fmt::Debug> fmt::Display for Signal<S> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self.shape {
             SignalShape::OneDimensional(_) => write!(f, "{:02x?}", self.data),
             SignalShape::TwoDimensional(width, height) => {
                 for y in 0..height {
-                    write!(f, "{:02x?}\n", &self.data.as_ref().get((y * width)..(y * width + width)))?;
+                    write!(f, "{:02x?}\n", &self.data.get((y * width)..(y * width + width)))?;
                 }
                 Ok(())
             }
@@ -109,12 +130,22 @@ impl<'a, S: Sample, C: AsMut<[S]> + AsRef<[S]> + fmt::Debug> fmt::Display for Si
     }
 }
 
-impl<'a, S: Sample, DataContainer: AsMut<[S]> + AsRef<[S]>> Signal<S, DataContainer> {
-    pub fn new(shape: SignalShape, data_container: DataContainer) -> Self {
+impl<'a, S: Sample> Signal<S> {
+    pub fn new(shape: SignalShape) -> Self {
+        let data_size = match shape {
+            SignalShape::OneDimensional(length) => length,
+            SignalShape::TwoDimensional(width, height) => width * height
+        };
         Signal {
             shape, 
-            data: data_container, 
-            _phantom_t: PhantomData
+            data: Vec::<S>::with_capacity(data_size)
+        }
+    }
+
+    pub fn with_data(shape: SignalShape, data: Vec<S>) -> Self {
+        Signal {
+            shape, 
+            data
         }
     }
 
@@ -122,7 +153,7 @@ impl<'a, S: Sample, DataContainer: AsMut<[S]> + AsRef<[S]>> Signal<S, DataContai
         match self.shape {
             SignalShape::OneDimensional(length) => {
                 RowsIter {
-                    data: &self.data.as_ref(),
+                    data: &self.data,
                     width: length,
                     current_row: 0,
                     total_rows: 1
@@ -130,7 +161,7 @@ impl<'a, S: Sample, DataContainer: AsMut<[S]> + AsRef<[S]>> Signal<S, DataContai
             }
             SignalShape::TwoDimensional(width, height) => {
                 RowsIter {
-                    data: &self.data.as_ref(),
+                    data: &self.data,
                     width,
                     current_row: 0,
                     total_rows: height
@@ -143,7 +174,7 @@ impl<'a, S: Sample, DataContainer: AsMut<[S]> + AsRef<[S]>> Signal<S, DataContai
         match self.shape {
             SignalShape::OneDimensional(length) => {
                 RowsIterMut {
-                    data: self.data.as_mut(),
+                    data: self.data.as_mut_slice(),
                     width: length,
                     current_row: 0,
                     total_rows: 1
@@ -151,7 +182,7 @@ impl<'a, S: Sample, DataContainer: AsMut<[S]> + AsRef<[S]>> Signal<S, DataContai
             }
             SignalShape::TwoDimensional(width, height) => {
                 RowsIterMut {
-                    data: self.data.as_mut(),
+                    data: self.data.as_mut_slice(),
                     width,
                     current_row: 0,
                     total_rows: height
@@ -159,56 +190,82 @@ impl<'a, S: Sample, DataContainer: AsMut<[S]> + AsRef<[S]>> Signal<S, DataContai
             }
         }
     }
-
-    fn _window<W>(&self, center: usize, window: &mut Signal<S, W>)
-    where
-        W: AsRef<[S]> + AsMut<[S]>
-    {
-        match self.shape {
-            SignalShape::OneDimensional(signal_length) => {
-                let c = center as isize;
-                let r = window.shape.radius() as isize;
-                let mut wi = 0;
-                let mut fi: usize;
-                for i in c - r ..= c + r {
-                    if i < 0 { fi = 0 }
-                    else if i as usize >= signal_length { fi = signal_length - 1 }
-                    else { fi = i as usize }
-                    window.data.as_mut()[wi] = self.data.as_ref()[fi];
-                    wi += 1;
-                }
+    
+    /*
+     * Xk = sum(n = 0, N - 1) xn * e^(-i2pikn)/N
+    */
+    pub fn dft(&self) -> Signal<Complex64> {
+        let mut X = Signal::<Complex64>::new(self.shape);
+        let N = self.data.len();
+        for k in 0..N {
+            let mut sum = Complex::new(0.0, 0.0);
+            for n in 0..N {
+                let cn = Complex::new(
+                    0.0, 
+                    ((-1.0 /*i*/ * 2.0 * PI) * k as f64 * n as f64) / N as f64
+                ).exp();
+                let xn = self.data[n];
+                sum += cn * xn.to_complex();
             }
-            SignalShape::TwoDimensional(width, height) => {
-                let c = center as isize;
-                let yc = (c as usize / width) as isize;
-                let xc = (c as usize % width) as isize;
-                let r = window.shape.radius() as isize;
-                let mut wi = 0;
-                let mut fy: usize;
-                let mut fx: usize;
-                for y in yc - r ..= yc + r {
-                    for x in xc - r ..= xc + r {
-                        if y < 0                     { fy = 0 }
-                        else if y as usize >= height { fy = height - 1 }
-                        else                         { fy = y as usize }
+            X.data.push(sum);
+        }
+        X
+    }
+    
+    pub fn to_complex64(&self) -> Signal<Complex64> {
+        Signal::with_data(self.shape, self.data.iter().map(|x| x.to_complex()).collect()) 
+    }
+    
+    pub fn dft_mag(&self) -> Vec<f64> {
+        let dft = self.dft();
+        dft.data[0..dft.data.len()].iter().map(|x| (x.re.powi(2) + x.im.powi(2)).sqrt()).collect()
+    }
+    
+    pub fn fft(&self) -> Signal<Complex64> {
+        let _fft = Self::_fft(&self.to_complex64().data, self.data.len());
+        Signal::with_data(self.shape, _fft)
+    }
+    
+    /*
+     * Xk = Ek + WkN * Ok
+     * Xk+N/2 = Ek - WkN * Ok
+     */
+    fn _fft(data_in: &[Complex64], N: usize) -> Vec<Complex64> {
+        let mut X = Vec::<Complex64>::with_capacity(N);
+        // SAFETY: N entries being initialized is guaranteed by the structure of the algo
+        unsafe { X.set_len(N);}
+        // println!("N: {}", N);
 
-                        if x < 0                    { fx = 0 }
-                        else if x as usize >= width { fx = width - 1 }
-                        else                        { fx = x as usize }
 
-                        let i = (fy * width) + fx;
+        // Once recursed to N == 1, just return the value of the sample.
+        // The sum of 1 sample is just that sample's total
+        if N == 1 {
+            X[0] = data_in[0];
+        } else {
+            // separate even and odd indices
+            let mut Ex = Vec::<Complex64>::with_capacity(N / 2);
+            let mut Ox = Vec::<Complex64>::with_capacity(N / 2);
 
-                        window.data.as_mut()[wi] = self.data.as_ref()[i];
-                        wi += 1;
-                    }
-                }
+            for m in 0..N / 2 {
+                Ex.push(data_in[2 * m]);
+                Ox.push(data_in[2 * m + 1]);
+            }
+
+            let E = Self::_fft(&Ex, N / 2);
+            let O = Self::_fft(&Ox, N / 2);
+
+            for k in 0..N/2 {
+                // WkN = e^(-i*2*pi*k)/N
+                let W = Complex::new(0.0, (-1.0 * 2.0 * PI * k as f64) / N as f64).exp();
+                X[k] = E[k] + O[k] * W;
+                X[k + N / 2] = E[k] - O[k] * W;
             }
         }
+        return X;
     }
 
-    fn window(&self, center: usize, shape: SignalShape) -> Signal<S, Vec<S>> {
-        let mut output = Vec::<S>::new();
-       
+    fn window(&self, center: usize, shape: SignalShape, output: &mut Vec<S>) {
+        output.clear();
         match self.shape {
             SignalShape::OneDimensional(signal_length) => {
                 let c = center as isize;
@@ -218,7 +275,7 @@ impl<'a, S: Sample, DataContainer: AsMut<[S]> + AsRef<[S]>> Signal<S, DataContai
                     if i < 0 { fi = 0 }
                     else if i as usize >= signal_length { fi = signal_length - 1 }
                     else { fi = i as usize }
-                    output.push(self.data.as_ref()[fi]);
+                    output.push(self.data[fi]);
                 }
             }
             SignalShape::TwoDimensional(width, height) => {
@@ -240,40 +297,46 @@ impl<'a, S: Sample, DataContainer: AsMut<[S]> + AsRef<[S]>> Signal<S, DataContai
 
                         let i = (fy * width) + fx;
 
-                        output.push(self.data.as_ref()[i]);
+                        output.push(self.data[i]);
                     }
                 }
             }
         }
-        Signal::new(shape, output)
     }
 
     pub fn filter_in_place(&mut self, kernel: &Kernel) {
-        let mut window = Signal::new(kernel.shape, Vec::<S>::with_capacity(kernel.data.len()));
+        let mut window = Signal::new(kernel.shape);
 
-        // SAFETY: self._window is guaranteed initialize the full vec
-        // (in the future anyway, right now this is not safe lol)
-        unsafe { window.data.set_len(kernel.data.len()) }
-
-        for i in 0..self.data.as_ref().len() {
-            self._window(i, &mut window);
-            let sample = S::convolve(&window.data, &kernel.data);
-            self.data.as_mut()[i] = sample;
+        for i in 0..self.data.len() {
+            self.window(i, kernel.shape, &mut window.data);
+            let sample = window.convolve(kernel);
+            self.data[i] = sample;
         }
     }
 
-    pub fn filter(&self, kernel: &Kernel) -> Signal<S, Vec<S>> {
+    pub fn filter(&self, kernel: &Kernel) -> Signal<S> {
         let mut output = Vec::<S>::new();
-        for i in 0..self.data.as_ref().len() {
-            let sample = S::convolve(
-                self.window(i, kernel.shape).data.as_slice(), 
-                kernel.data.as_slice());
+        let mut window = Signal::new(kernel.shape);
+        for i in 0..self.data.len() {
+            window.data.clear();
+            self.window(i, kernel.shape, &mut window.data);
+            let sample = window.convolve(kernel);
+            // let sample = S::convolve(&window.data, &kernel.data);
             output.push(sample);
         }
-        Signal::new(kernel.shape, output)
+        Signal::with_data(kernel.shape, output)
+    }
+    
+    fn convolve(&self, kernel: &Kernel) -> S {
+        // TODO: shape and length validation, should match exactly
+        let mut output = S::zero();
+        for i in 0..self.data.len() {
+            output = output.add(self.data[i].scale_f32(kernel.data[i]));
+        }
+        output
     }
 
-    pub fn _resample(&self, scale: f32, sampling_method: SamplingMethod, output: &mut Signal<S, Vec<S>>) {
+    pub fn _resample(&self, scale: f32, sampling_method: SamplingMethod, output: &mut Signal<S>) {
         output.data.clear();
         match self.shape {
             SignalShape::OneDimensional(length) => {
@@ -285,25 +348,25 @@ impl<'a, S: Sample, DataContainer: AsMut<[S]> + AsRef<[S]>> Signal<S, DataContai
                     match sampling_method {
                         SamplingMethod::Point => {
                             if x == 0.0 {
-                                output.data.push(self.data.as_ref()[x as usize]);
+                                output.data.push(self.data[x as usize]);
                             } else if x >= length as f32 {
-                                output.data.push(self.data.as_ref()[length - 1]) 
+                                output.data.push(self.data[length - 1]) 
                             } else {
-                                output.data.push(self.data.as_ref()[x as usize]);
+                                output.data.push(self.data[x as usize]);
                             }
                         }
                         SamplingMethod::Linear => {
                             let x1 = x as usize;
                             let y;
-                            if x >= (self.data.as_ref().len() - 1) as f32 {
+                            if x >= (self.data.len() - 1) as f32 {
                                 // linear extrapolation
                                 let x0 = (x - 1.0) as usize;
-                                let preceeding_val = linear_interpolate(x0 as f32, &self.data.as_ref()[x0], x1 as f32, &self.data.as_ref()[x1], x);
-                                let inc = self.data.as_ref()[x1].sub(preceeding_val);
-                                y = self.data.as_ref()[x1].sub(inc);
+                                let preceeding_val = linear_interpolate(x0 as f32, &self.data[x0], x1 as f32, &self.data[x1], x);
+                                let inc = self.data[x1].sub(preceeding_val);
+                                y = self.data[x1].sub(inc);
                             } else {
                                 let x2 = (x + 1.0) as usize;
-                                y = linear_interpolate(x1 as f32, &self.data.as_ref()[x1], x2 as f32, &self.data.as_ref()[x2], x);
+                                y = linear_interpolate(x1 as f32, &self.data[x1], x2 as f32, &self.data[x2], x);
                             }
                             output.data.push(y);
                         }
@@ -328,10 +391,10 @@ impl<'a, S: Sample, DataContainer: AsMut<[S]> + AsRef<[S]>> Signal<S, DataContai
                                 let sx = (dx as f32 / (new_width - 1) as f32 ) * (width - 1) as f32;
                                 let (x1, x2, y1, y2) = bilinear_interpolate_get_neighbors(sx, sy);
 
-                                let q11 = self.data.as_ref()[x1 + (y1 * width)];
-                                let q21 = self.data.as_ref()[x2 + (y1 * width)];
-                                let q12 = self.data.as_ref()[x1 + (y2 * width)];
-                                let q22 = self.data.as_ref()[x2 + (y2 * width)];
+                                let q11 = self.data[x1 + (y1 * width)];
+                                let q21 = self.data[x2 + (y1 * width)];
+                                let q12 = self.data[x1 + (y2 * width)];
+                                let q22 = self.data[x2 + (y2 * width)];
                                 let p = bilinear_interpolate(x1 as f32, y1 as f32, x2 as f32, y2 as f32, &q11, &q21, &q12, &q22, sx, sy);
 
                                 output.data.push(p);
@@ -345,7 +408,7 @@ impl<'a, S: Sample, DataContainer: AsMut<[S]> + AsRef<[S]>> Signal<S, DataContai
         }
     }
 
-    pub fn resample(&self, scale: f32, sampling_method: SamplingMethod) -> Signal<S, Vec<S>> {
+    pub fn resample(&self, scale: f32, sampling_method: SamplingMethod) -> Signal<S> {
         match self.shape {
             SignalShape::OneDimensional(length) => {
                 // TODO: is this correct? Should we leave it at 0?
@@ -384,25 +447,25 @@ impl<'a, S: Sample, DataContainer: AsMut<[S]> + AsRef<[S]>> Signal<S, DataContai
                     match sampling_method {
                         SamplingMethod::Point => {
                             if x == 0.0 {
-                                sampled_data.push(self.data.as_ref()[x as usize]);
+                                sampled_data.push(self.data[x as usize]);
                             } else if x >= length as f32 {
-                                sampled_data.push(self.data.as_ref()[length - 1]) 
+                                sampled_data.push(self.data[length - 1]) 
                             } else {
-                                sampled_data.push(self.data.as_ref()[x as usize]);
+                                sampled_data.push(self.data[x as usize]);
                             }
                         }
                         SamplingMethod::Linear => {
                             let x1 = x as usize;
                             let y;
-                            if x >= (self.data.as_ref().len() - 1) as f32 {
+                            if x >= (self.data.len() - 1) as f32 {
                                 // linear extrapolation
                                 let x0 = (x - 1.0) as usize;
-                                let preceeding_val = linear_interpolate(x0 as f32, &self.data.as_ref()[x0], x1 as f32, &self.data.as_ref()[x1], x);
-                                let inc = self.data.as_ref()[x1].sub(preceeding_val);
-                                y = self.data.as_ref()[x1].sub(inc);
+                                let preceeding_val = linear_interpolate(x0 as f32, &self.data[x0], x1 as f32, &self.data[x1], x);
+                                let inc = self.data[x1].sub(preceeding_val);
+                                y = self.data[x1].sub(inc);
                             } else {
                                 let x2 = (x + 1.0) as usize;
-                                y = linear_interpolate(x1 as f32, &self.data.as_ref()[x1], x2 as f32, &self.data.as_ref()[x2], x);
+                                y = linear_interpolate(x1 as f32, &self.data[x1], x2 as f32, &self.data[x2], x);
                             }
                             sampled_data.push(y);
                         }
@@ -411,7 +474,7 @@ impl<'a, S: Sample, DataContainer: AsMut<[S]> + AsRef<[S]>> Signal<S, DataContai
                     x += step;
                 }
                 let new_length = sampled_data.len();
-                Signal::new(SignalShape::OneDimensional(new_length), sampled_data)
+                Signal::with_data(SignalShape::OneDimensional(new_length), sampled_data)
             }
             SignalShape::TwoDimensional(width, height) => {
                 let new_width  = (width as f32 * scale) as usize;
@@ -435,10 +498,10 @@ impl<'a, S: Sample, DataContainer: AsMut<[S]> + AsRef<[S]>> Signal<S, DataContai
                                 // should be supported though...
                                 // on the other hand, window currently instantiates a new object
                                 // and this is less heavy
-                                let q11 = self.data.as_ref()[x1 + (y1 * width)];
-                                let q21 = self.data.as_ref()[x2 + (y1 * width)];
-                                let q12 = self.data.as_ref()[x1 + (y2 * width)];
-                                let q22 = self.data.as_ref()[x2 + (y2 * width)];
+                                let q11 = self.data[x1 + (y1 * width)];
+                                let q21 = self.data[x2 + (y1 * width)];
+                                let q12 = self.data[x1 + (y2 * width)];
+                                let q22 = self.data[x2 + (y2 * width)];
                                 let p = bilinear_interpolate(x1 as f32, y1 as f32, x2 as f32, y2 as f32, &q11, &q21, &q12, &q22, sx, sy);
 
                                 sampled.push(p);
@@ -448,7 +511,7 @@ impl<'a, S: Sample, DataContainer: AsMut<[S]> + AsRef<[S]>> Signal<S, DataContai
                     _ => panic!("unsupported sampling method")
                 }
 
-                Signal::new(SignalShape::TwoDimensional(new_width, new_height), sampled)
+                Signal::with_data(SignalShape::TwoDimensional(new_width, new_height), sampled)
             }
         }
     }
@@ -464,7 +527,7 @@ pub fn moving_average_kernel(radius: usize) -> Vec<f32> {
 pub fn moving_average_kernel_new2(radius: usize) -> Kernel {
     let size = radius * 2 + 1;
     let data = vec![1.0 / (radius * 2 + 1) as f32; radius * 2 + 1];
-    Signal::new(SignalShape::OneDimensional(size), data)
+    Signal::with_data(SignalShape::OneDimensional(size), data)
 }
 
 pub fn moving_avg_kernel_unsized(kernel: &mut Kernel) {
@@ -508,4 +571,102 @@ pub fn bilinear_interpolate<S: Sample>(
 fn bilinear_interpolate_get_neighbors(x: f32, y: f32) -> (usize, usize, usize, usize) {
     // TODO: can we avoid using ceil() here? It's slower than casting
     (x as usize, x.ceil() as usize, y as usize, y.ceil() as usize)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{fs::File, io::{BufReader, Read, Write}};
+
+    use super::*;    
+    
+    fn read_f64_from_file(file: &str) -> Vec<f64> {
+        let mut input = BufReader::new(
+            File::open(file).expect("Failed to open file")
+        );
+        let mut data = Vec::<f64>::new();
+        loop {
+            use std::io::ErrorKind;
+            let mut buffer = [0u8; std::mem::size_of::<f64>()];
+            let res = input.read_exact(&mut buffer);
+            match res {
+                Err(error) if error.kind() == ErrorKind::UnexpectedEof => break,
+                _ => {}
+            }
+            res.expect("Unexpected error during read");
+            let val = f64::from_le_bytes(buffer);
+            data.push(val);
+        }
+        data
+    }
+
+    fn read_complex_from_file(file: &str) -> Vec<Complex64> {
+        let mut input = BufReader::new(
+            File::open(file).expect("Failed to open file")
+        );
+        let mut data = Vec::<Complex64>::new();
+        loop {
+            use std::io::ErrorKind;
+            let mut buffer = [0u8; std::mem::size_of::<f64>()];
+            let res = input.read_exact(&mut buffer);
+            match res {
+                Err(error) if error.kind() == ErrorKind::UnexpectedEof => break,
+                _ => {}
+            }
+            res.expect("Unexpected error during read");
+            let re = f64::from_le_bytes(buffer);
+            let res = input.read_exact(&mut buffer);
+            match res {
+                Err(error) if error.kind() == ErrorKind::UnexpectedEof => break,
+                _ => {}
+            }
+            let im = f64::from_le_bytes(buffer);
+            data.push(Complex::new(re, im));
+        }
+        data
+    }
+    #[test]
+    fn it_transforms_dft() {
+        let data = read_complex_from_file("/home/sen/Projects/RS170/sine_wave.complex64");
+        // let data = read_f64_from_file("/home/sen/Projects/RS170/sine_wave.float64");
+
+        let signal = Signal::with_data(
+            SignalShape::OneDimensional(data.len()),
+            data
+        );
+
+        let dft = signal.dft();
+        let mut f2 = File::create("/home/sen/Projects/RS170/sine_wave_dft.complex64").unwrap();
+        for val in &dft.data {
+            f2.write(&val.re.to_le_bytes()).unwrap();
+            f2.write(&val.im.to_le_bytes()).unwrap();
+        }
+
+        let mag: Vec<f64> = dft.data.iter().map(|x| (x.re.powi(2) + x.im.powi(2)).sqrt()).collect();
+        let mut f1 = File::create("/home/sen/Projects/RS170/sine_wave_dft_mag.float64").unwrap();
+        for val in mag {
+            f1.write(&val.to_le_bytes()).unwrap();
+        }
+    }
+    
+    #[test]
+    fn it_transforms_fft() {
+        let data = read_complex_from_file("/home/sen/Projects/RS170/sine_wave.complex64");
+        let signal = Signal::with_data(
+            SignalShape::OneDimensional(data.len()),
+            data
+        );
+        let fft = signal.fft();
+
+        let mut f2 = File::create("/home/sen/Projects/RS170/sine_wave_fft.complex64").unwrap();
+        for val in &fft.data {
+            f2.write(&val.re.to_le_bytes()).unwrap();
+            f2.write(&val.im.to_le_bytes()).unwrap();
+        }
+
+        let mag: Vec<f64> = fft.data.iter().map(|x| (x.re.powi(2) + x.im.powi(2)).sqrt()).collect();
+        let mut f1 = File::create("/home/sen/Projects/RS170/sine_wave_fft_mag.float64").unwrap();
+        for val in mag {
+            f1.write(&val.to_le_bytes()).unwrap();
+        }
+    }
 }

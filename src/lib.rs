@@ -1,5 +1,6 @@
 use crate::sample::Sample;
 use image::Rgb;
+use num::complex::Complex;
 
 pub mod sample;
 pub mod crop;
@@ -9,6 +10,9 @@ pub mod ntsc;
 impl Sample for u8 {
     fn to_f32(&self) -> f32 {
         *self as f32
+    }
+    fn to_complex(&self) -> num::complex::Complex64 {
+        Complex::new(*self as f64, 0.0)
     }
     fn scale_f32(&self, scalar: f32) -> Self {
         (*self as f32 * scalar) as Self
@@ -25,11 +29,17 @@ impl Sample for u8 {
     fn zero() -> Self {
         return 0u8;
     }
+    fn magnitude(&self) -> f32 {
+        self.to_f32()
+    }
 }
 
 impl Sample for f32 {
     fn to_f32(&self) -> f32 {
         *self
+    }
+    fn to_complex(&self) -> num::complex::Complex64 {
+        Complex::new(*self as f64, 0.0)
     }
     fn scale_f32(&self, scalar: f32) -> Self {
         *self * scalar
@@ -46,11 +56,44 @@ impl Sample for f32 {
     fn zero() -> Self {
         return 0f32;
     }
+    fn magnitude(&self) -> f32 {
+        self.to_f32()
+    }
+}
+
+impl Sample for f64 {
+    fn to_f32(&self) -> f32 {
+        *self as f32
+    }
+    fn to_complex(&self) -> num::complex::Complex64 {
+        Complex::new(*self as f64, 0.0)
+    }
+    fn scale_f32(&self, scalar: f32) -> Self {
+        *self * scalar as f64
+    }
+    fn add(&self, other: Self) -> Self {
+        self + other
+    }
+    fn sub(&self, other: Self) -> Self {
+        self - other    
+    }
+    fn depth() -> usize {
+        return 1;
+    }
+    fn zero() -> Self {
+        return 0f64;
+    }
+    fn magnitude(&self) -> f32 {
+        self.to_f32()
+    }
 }
 
 impl Sample for image::Luma<u8> {
     fn to_f32(&self) -> f32 {
         self.0[0] as f32
+    }
+    fn to_complex(&self) -> num::complex::Complex64 {
+        Complex::new(self.0[0] as f64, 0.0)
     }
     fn scale_f32(&self, scalar: f32) -> Self {
         image::Luma([(self.0[0] as f32 * scalar) as u8])
@@ -67,11 +110,25 @@ impl Sample for image::Luma<u8> {
     fn zero() -> Self {
         image::Luma([0u8])
     }
+    fn magnitude(&self) -> f32 {
+        self.to_f32()
+    }
 }
     
 impl Sample for Rgb<u8> {
+    // TODO: see below
     fn to_f32(&self) -> f32 {
         self.0[0] as f32
+    }
+    // TODO: this is broken, need to fix for fourier transform to work on signals
+    // with depth greater than 1. Needs to account for high frequency changes
+    // at a particular depth - may need to reevaluate how this kind of signal is
+    // represented
+    fn to_complex(&self) -> num::complex::Complex64 {
+        let r = self.0[0] as f64;
+        let g = self.0[1] as f64;
+        let b = self.0[2] as f64;
+        Complex::new(r + g + b, 0.0)
     }
     fn scale_f32(&self, scalar: f32) -> Self {
         let r = (self.0[0] as f32 * scalar) as u8;
@@ -97,6 +154,9 @@ impl Sample for Rgb<u8> {
     fn zero() -> Self {
         Rgb([0u8, 0u8, 0u8])
     }
+    fn magnitude(&self) -> f32 {
+        self.to_f32()
+    }
 }
 
 #[cfg(test)]
@@ -121,7 +181,7 @@ mod tests {
 
     #[test]
     fn it_filters_image() {
-        let gaussian_kernel = Kernel::new(
+        let gaussian_kernel = Kernel::with_data(
             SignalShape::TwoDimensional(5, 5),
             vec![ 0.0318, 0.0375, 0.0397, 0.0375, 0.0318,
                         0.0375, 0.0443, 0.0468, 0.0443, 0.0375,
@@ -134,7 +194,7 @@ mod tests {
         let img_ = ImageReader::open(filename).unwrap().decode().unwrap();
         let img = img_.to_rgb8();
 
-        let signal = Signal::new(
+        let signal = Signal::with_data(
             SignalShape::TwoDimensional(img.width() as usize, img.height() as usize),
             img.enumerate_pixels().map(|(_, _, pixel)| *pixel).collect::<Vec<Rgb<u8>>>()
         );
@@ -241,7 +301,7 @@ mod tests {
             let (cropped_width, cropped_height, pixels) = 
                 crop_for_ntsc(&pixels, img.width() as usize, img.height() as usize);
 
-            let signal = Signal::new(SignalShape::TwoDimensional(cropped_width, cropped_height), pixels);
+            let signal = Signal::with_data(SignalShape::TwoDimensional(cropped_width, cropped_height), pixels);
 
             let scale = NTSC_VISIBLE_LINE_COUNT as f32 / cropped_width as f32;
             let scaled_width = (cropped_width as f32 * scale) as u32;
@@ -296,7 +356,7 @@ mod tests {
         println!("original dat:\t{:02x?}", data);
 
         let shape = SignalShape::OneDimensional(data.len());
-        let signal = Signal::new(shape, data);
+        let signal = Signal::with_data(shape, data);
         let filtered_data = signal.filter(&kernel);
         println!("filtered new:\t{:02x?}", filtered_data.data);
 
@@ -306,7 +366,7 @@ mod tests {
         println!("original dat:\t{:02x?}", data);
 
         let shape = SignalShape::OneDimensional(data.len());
-        let signal = Signal::new(shape, data);
+        let signal = Signal::with_data(shape, data);
         let filtered_data = signal.filter(&kernel).data;
 
         println!("filtered new:\t{:02x?}", filtered_data);
@@ -316,7 +376,7 @@ mod tests {
     fn it_filters_new_2d() {
         let kernel = crate::signal::moving_average_kernel_new(SignalShape::TwoDimensional(3, 3));
 
-        let data = Signal::<u8, Vec<u8>>::new(
+        let data = Signal::<u8>::with_data(
             SignalShape::TwoDimensional(7, 7),
             vec![0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06,
                  0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d,
@@ -327,10 +387,10 @@ mod tests {
                  0x2a, 0x2b, 0x2c, 0x2d, 0x2e, 0x2f, 0x30]
         );
         println!("original:\n{}", data);
-        let filtered: Signal<u8, Vec<u8>> = data.filter(&kernel);
+        let filtered: Signal<u8> = data.filter(&kernel);
         println!("filtered:\n{}", filtered);
 
-        let data = Signal::new(
+        let data = Signal::with_data(
             SignalShape::TwoDimensional(7, 5),
             vec![0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
                  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
@@ -339,10 +399,10 @@ mod tests {
                  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]
         );
         println!("original:\n{}", data);
-        let filtered: Signal<u8, Vec<u8>> = data.filter(&kernel);
+        let filtered: Signal<u8> = data.filter(&kernel);
         println!("filtered:\n{}", filtered);
 
-        let data = Signal::new(
+        let data = Signal::with_data(
             SignalShape::TwoDimensional(6, 6),
             vec![
                 Rgb([255,255,255]), Rgb([255,255,255]), Rgb([255,255,255]), Rgb([255,255,255]), Rgb([255,255,255]), Rgb([255,255,255]),
@@ -369,7 +429,7 @@ mod tests {
 
         let pixels = img.as_mut();
 
-        let kernel = Kernel::new(
+        let kernel = Kernel::with_data(
             SignalShape::OneDimensional(10),
             moving_average_kernel(10)
         );
@@ -385,9 +445,9 @@ mod tests {
 
             let row_pixel_len = row_pixels.len();
 
-            Signal::new(
+            Signal::with_data(
                 SignalShape::OneDimensional(row_pixel_len),
-                &mut row_pixels,
+                row_pixels.to_vec(),
             ).filter_in_place(&kernel);
         }
 
@@ -409,7 +469,7 @@ mod tests {
 
         let pixels = img.enumerate_pixels().map(|(_, _, pixel)| *pixel).collect::<Vec<Rgb<u8>>>();
 
-        let signal = Signal::new(
+        let signal = Signal::with_data(
             SignalShape::TwoDimensional(img.width() as usize, img.height() as usize),
             pixels
         );
@@ -452,7 +512,7 @@ mod tests {
 
         let pixels = img.enumerate_pixels().map(|(_, _, pixel)| *pixel).collect::<Vec<image::Luma<u8>>>();
 
-        let signal = Signal::new(
+        let signal = Signal::with_data(
             SignalShape::TwoDimensional(img.width() as usize, img.height() as usize),
             pixels
         );
@@ -473,7 +533,7 @@ mod tests {
     fn it_resamples_2d() {
         let shape = SignalShape::OneDimensional(10);
         let data: [u8; 10] = [0, 10, 20, 30, 40, 50, 60, 70, 80, 90];
-        let signal = Signal::new(shape, data.to_vec());
+        let signal = Signal::with_data(shape, data.to_vec());
         let sampled = signal.resample(0.5, SamplingMethod::Point);
         println!("original: {:?}", signal.data);
         println!("resample: {:?}", sampled.data);
@@ -493,7 +553,7 @@ mod tests {
         println!("original: {:?}", signal.data);
         println!("resample: {:?}", sampled.data);
 
-        let signal = Signal::new(
+        let signal = Signal::with_data(
             SignalShape::OneDimensional(7),
             vec![1, 3, 5, 7, 9, 11, 13]
         );
@@ -502,7 +562,7 @@ mod tests {
         println!("original: {:?}", signal.data);
         println!("resample: {:?}", sampled.data);
 
-        let signal = Signal::new(
+        let signal = Signal::with_data(
             SignalShape::OneDimensional(7),
             vec![1, 1, 90, 2, 100, 22, 13, 1]
         );
@@ -511,7 +571,7 @@ mod tests {
         println!("original: {:?}", signal.data);
         println!("resample: {:?}", sampled.data);
 
-        let signal = Signal::new(
+        let signal = Signal::with_data(
             SignalShape::OneDimensional(7),
             vec![1, 1, 90, 2, 100, 22, 13, 1]
         );
@@ -524,18 +584,18 @@ mod tests {
         let mut data = Vec::<u8>::new();
         f.read_to_end(&mut data).unwrap();
 
-        let signal = Signal::new(
+        let signal = Signal::with_data(
             SignalShape::OneDimensional(data.len()),
-            &mut data
+            data.clone()
         );
 
         let sampled = signal.resample(0.5, SamplingMethod::Linear);
         let mut f2 = File::create("/home/sen/Projects/RS170/sine_wave_downscaled_0.5.bin").unwrap();
         f2.write_all(sampled.data.as_slice()).unwrap();
 
-        let signal = Signal::new(
+        let signal = Signal::with_data(
             SignalShape::OneDimensional(data.len()),
-            &mut data
+            data.clone()
         );
         let sampled = signal.resample(5.0, SamplingMethod::Linear);
         let mut f2 = File::create("/home/sen/Projects/RS170/sine_wave_upscaled_5.bin").unwrap();
@@ -544,7 +604,7 @@ mod tests {
 
     #[test]
     fn it_resamples_3d() {
-        let data = Signal::new(
+        let data = Signal::with_data(
             SignalShape::TwoDimensional(7, 7),
             vec![0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06,
                  0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d,
@@ -561,7 +621,7 @@ mod tests {
         let sampled = data.resample(2.0, SamplingMethod::Bilinear);
         println!("sampled :\n{}", sampled);
 
-        let data = Signal::new(
+        let data = Signal::with_data(
             SignalShape::TwoDimensional(7, 5),
             vec![0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
                  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
@@ -575,7 +635,7 @@ mod tests {
         let sampled = data.resample(2.0, SamplingMethod::Bilinear);
         println!("sampled :\n{}", sampled);
 
-        let data = Signal::new(
+        let data = Signal::with_data(
             SignalShape::TwoDimensional(6, 6),
             vec![
                 Rgb([255,255,255]), Rgb([255,255,255]), Rgb([255,255,255]), Rgb([255,255,255]), Rgb([255,255,255]), Rgb([255,255,255]),

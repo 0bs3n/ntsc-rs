@@ -21,7 +21,7 @@ const NTSC_H_ACTIVE_VIDEO: f32 = 52.6;
 // const SAMPLE_RATE_HZ: usize = 10_046_600;
 // const SAMPLE_PER_LINE_ACTIVE_VIDEO: usize = 191000;
 
-pub fn horizontal_filter<S: Sample, C: AsRef<[S]> + AsMut<[S]>>(frame: &mut Signal<S, C>, kernel: &Kernel) {
+pub fn horizontal_filter<S: Sample>(frame: &mut Signal<S>, kernel: &Kernel) {
     println!("in horizontal_filter");
     let width = if let SignalShape::TwoDimensional(width, _) = frame.shape {
         width
@@ -31,11 +31,11 @@ pub fn horizontal_filter<S: Sample, C: AsRef<[S]> + AsMut<[S]>>(frame: &mut Sign
 
     for (i, row) in frame.iter_rows_mut().enumerate() {
         println!("i: {}", i);
-        Signal::new(SignalShape::OneDimensional(width), row).filter_in_place(&kernel);
+        Signal::with_data(SignalShape::OneDimensional(width), row.to_vec()).filter_in_place(kernel);
     }
 }
 
-fn _frame_to_signal<S: Sample, C: AsRef<[S]> + AsMut<[S]>>(frame: Signal<S, C>) {
+fn _frame_to_signal<S: Sample, C: AsRef<[S]> + AsMut<[S]>>(frame: Signal<S>) {
     // for each other line in frame (split even/odd fields)
     // sample line data at appropriate sample rate (assuming a certain transmit rate)
     // convert each sample to IRE value (or voltage? implicit conversion?)
@@ -110,12 +110,12 @@ pub fn ntsc_process_frame<S: image::Pixel + Sample>(pixels: &[S], width: usize, 
     let scaled_width = (cropped_width as f32 * scale) as usize;
     let scaled_height = (cropped_height as f32 * scale) as usize;
 
-    let mut scaled = Signal::new(
+    let mut scaled = Signal::with_data(
         SignalShape::TwoDimensional(cropped_width, cropped_height),
         pixels
     ).resample(scale, SamplingMethod::Bilinear);
 
-    let kernel = Kernel::new(SignalShape::OneDimensional(7), moving_average_kernel(3));
+    let kernel = Kernel::with_data(SignalShape::OneDimensional(7), moving_average_kernel(3));
 
     horizontal_filter(&mut scaled, &kernel);
 
