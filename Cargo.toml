@@ -6,3 +6,4 @@ edition = "2021"
 [dependencies]
 image = "0.25.6"
 num = "0.4.3"
+prime_factorization = "1.0.5"

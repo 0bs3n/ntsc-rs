@@ -23,6 +23,9 @@ impl Sample for u8 {
     fn sub(&self, other: Self) -> Self {
         self.saturating_sub(other)
     }
+    fn mul(&self, other: Self) -> Self {
+        self * other
+    }
     fn depth() -> usize {
         return 1;
     }
@@ -31,6 +34,9 @@ impl Sample for u8 {
     }
     fn magnitude(&self) -> f32 {
         self.to_f32()
+    }
+    fn write_to_file(&self, f: &mut std::fs::File) -> Result<(), std::io::Error> {
+        unimplemented!()
     }
 }
 
@@ -50,6 +56,9 @@ impl Sample for f32 {
     fn sub(&self, other: Self) -> Self {
         self - other    
     }
+    fn mul(&self, other: Self) -> Self {
+        self * other
+    }
     fn depth() -> usize {
         return 1;
     }
@@ -58,6 +67,9 @@ impl Sample for f32 {
     }
     fn magnitude(&self) -> f32 {
         self.to_f32()
+    }
+    fn write_to_file(&self, f: &mut std::fs::File) -> Result<(), std::io::Error> {
+        unimplemented!()
     }
 }
 
@@ -77,6 +89,9 @@ impl Sample for f64 {
     fn sub(&self, other: Self) -> Self {
         self - other    
     }
+    fn mul(&self, other: Self) -> Self {
+        self * other
+    }
     fn depth() -> usize {
         return 1;
     }
@@ -85,6 +100,9 @@ impl Sample for f64 {
     }
     fn magnitude(&self) -> f32 {
         self.to_f32()
+    }
+    fn write_to_file(&self, f: &mut std::fs::File) -> Result<(), std::io::Error> {
+        unimplemented!()
     }
 }
 
@@ -104,6 +122,9 @@ impl Sample for image::Luma<u8> {
     fn sub(&self, other: Self) -> Self {
         image::Luma([self.0[0].saturating_sub(other.0[0])])
     }
+    fn mul(&self, _other: Self) -> Self {
+        unimplemented!()
+    }
     fn depth() -> usize {
         return 1;
     }
@@ -112,6 +133,9 @@ impl Sample for image::Luma<u8> {
     }
     fn magnitude(&self) -> f32 {
         self.to_f32()
+    }
+    fn write_to_file(&self, f: &mut std::fs::File) -> Result<(), std::io::Error> {
+        unimplemented!()
     }
 }
     
@@ -148,6 +172,9 @@ impl Sample for Rgb<u8> {
         let b = self.0[2].saturating_sub(other.0[2]);
         Rgb([r, g, b])
     }
+    fn mul(&self, _other: Self) -> Self {
+        unimplemented!()
+    }
     fn depth() -> usize {
         return 3;
     }
@@ -156,6 +183,9 @@ impl Sample for Rgb<u8> {
     }
     fn magnitude(&self) -> f32 {
         self.to_f32()
+    }
+    fn write_to_file(&self, f: &mut std::fs::File) -> Result<(), std::io::Error> {
+        unimplemented!()
     }
 }
 
@@ -439,7 +469,7 @@ mod tests {
             let row_end = row_start + (width * 3);
 
             let row_bytes = &mut pixels[row_start..row_end];
-            let mut row_pixels: &mut [Rgb<u8>] = unsafe {
+            let row_pixels: &mut [Rgb<u8>] = unsafe {
                 std::slice::from_raw_parts_mut(row_bytes.as_mut_ptr() as *mut Rgb<u8>, width)
             };
 

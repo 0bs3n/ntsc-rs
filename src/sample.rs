@@ -1,4 +1,4 @@
-use std::fmt::Debug;
+use std::{fmt::Debug, fs::File};
 
 pub fn linear_interpolate<S: Sample>(
     x1: f32, y1: &S, 
@@ -30,9 +30,11 @@ pub trait Sample: Debug + Copy {
     fn scale_f32(&self, scalar: f32) -> Self;
     fn add(&self, other: Self) -> Self;
     fn sub(&self, other: Self) -> Self;
+    fn mul(&self, other: Self) -> Self;
     fn depth() -> usize;
     fn to_f32(&self) -> f32;
     fn to_complex(&self) -> num::complex::Complex64;
     fn zero() -> Self;
     fn magnitude(&self) -> f32;
+    fn write_to_file(&self, f: &mut File) -> Result<(), std::io::Error>;
 }

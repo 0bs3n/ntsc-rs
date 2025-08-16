@@ -1,7 +1,10 @@
+use std::fs::File;
+use std::io::{Error, Write};
 use std::{fmt};
 use num::complex::Complex64;
 use num::Complex;
 use std::f64::consts::PI;
+use prime_factorization::Factorization;
 
 use crate::sample::Sample;
 
@@ -18,6 +21,9 @@ impl Sample for num::complex::Complex64 {
     fn sub(&self, other: Self) -> Self {
         self - other
     }
+    fn mul(&self, other: Self) -> Self {
+        self * other
+    }
     fn to_complex(&self) -> num::complex::Complex64 {
         *self
     }
@@ -30,12 +36,31 @@ impl Sample for num::complex::Complex64 {
     fn magnitude(&self) -> f32 {
         (self.re.powi(2) + self.im.powi(2)).sqrt() as f32
     }
+    fn write_to_file(&self, f: &mut File) -> Result<(), std::io::Error> {
+        f.write(&self.re.to_le_bytes())?;
+        f.write(&self.im.to_le_bytes())?;
+        Ok(())
+    }
 }
 
 pub enum SamplingMethod {
     Point,
     Linear,
     Bilinear
+}
+#[derive(Copy, Clone, Debug)]
+pub enum FftDirection {
+    Forward,
+    Inverse
+}
+
+impl FftDirection {
+    fn invert(self) -> Self {
+        match self {
+            Self::Forward => Self::Inverse,
+            Self::Inverse => Self::Forward
+        }
+    }
 }
 
 #[derive(Copy, Clone, Debug)]
@@ -62,6 +87,24 @@ pub fn moving_average_kernel_new(shape: SignalShape) -> Kernel {
             Signal::with_data(shape, vec![1.0 / size as f32; size]),
         SignalShape::TwoDimensional(width, height) => 
             Signal::with_data(shape, vec![1.0 / (width * height) as f32; width * height])
+    }
+}
+
+enum Radix {
+    Two,
+    Three,
+    Five,
+    None
+}
+
+impl Radix {
+    fn from_factor(factor: u128) -> Self {
+        match factor {
+            2 => Self::Two,
+            3 => Self::Three,
+            5 => Self::Five,
+            _ => Self::None
+        }
     }
 }
 
@@ -191,9 +234,18 @@ impl<'a, S: Sample> Signal<S> {
         }
     }
     
+    pub fn mul(&self, other: Self) -> Self {
+        let mut data = Vec::<S>::new();
+        for (s, o) in self.data.iter().zip(other.data.iter()) {
+            data.push(s.mul(*o)); 
+        }
+        Signal::with_data(self.shape, data)
+    }
+    
     /*
      * Xk = sum(n = 0, N - 1) xn * e^(-i2pikn)/N
     */
+    #[allow(non_snake_case)]
     pub fn dft(&self) -> Signal<Complex64> {
         let mut X = Signal::<Complex64>::new(self.shape);
         let N = self.data.len();
@@ -221,44 +273,175 @@ impl<'a, S: Sample> Signal<S> {
         dft.data[0..dft.data.len()].iter().map(|x| (x.re.powi(2) + x.im.powi(2)).sqrt()).collect()
     }
     
-    pub fn fft(&self) -> Signal<Complex64> {
-        let _fft = Self::_fft(&self.to_complex64().data, self.data.len());
+    pub fn fft_mixed_radix(&self, factors: &Vec<u128>) {
+        for factor in factors {
+            match Radix::from_factor(*factor) {
+                Radix::Two   => {
+
+                }
+                Radix::Three => {
+
+                }
+                Radix::Five  => {
+
+                }
+                Radix::None  => {
+                    
+                }
+            }
+        }
+    }
+    
+    pub fn dump_to_file(&self, filename: &str) -> Result<(), std::io::Error>{
+        let mut f = File::create(filename)?;
+        for sample in &self.data {
+            sample.write_to_file(&mut f)?;
+        } 
+        Ok(())
+    }
+
+    pub fn fft_dyn_alloc_slow(&self) -> Signal<Complex64> {
+        let _fft = Self::_fft_dyn_alloc_slow(&self.to_complex64().data, self.data.len());
         Signal::with_data(self.shape, _fft)
+    }
+    
+    pub fn radix2_fft(&self, direction: FftDirection) -> Signal<Complex64> {
+        let mut _fft = Vec::<Complex64>::with_capacity(self.data.len());
+        for _ in 0..self.data.len() {
+            _fft.push(Complex::new(0.0, 0.0));
+        }
+        unsafe { _fft.set_len(self.data.len()); }
+        Self::_radix2_fft(&self.to_complex64().data, &mut _fft, self.data.len(), 1, direction);
+        Signal::with_data(self.shape, _fft)
+    }
+    
+    
+    #[allow(non_snake_case)]
+    fn _radix2_fft(x: &[Complex64], mut X: &mut [Complex64], N: usize, S: usize, D: FftDirection) {
+        if N == 1 {
+            X[0] = x[0];
+        } else {
+            let M = N / 2;
+            Self::_radix2_fft(&x, &mut X, M, S * 2, D);
+            Self::_radix2_fft(&x[S..], &mut X[M..N], M, S * 2, D);
+
+            let sign = match D {
+                FftDirection::Forward => -1.0,
+                FftDirection::Inverse => 1.0,
+            };
+        
+            for k in 0..M {
+                let W = Complex::new(0.0, (sign * 2.0 * PI * k as f64) / N as f64).exp();                 
+                let a = X[k];
+                let b = X[k + M];
+                let A = a + b * W;
+                let B = a - b * W;
+                X[k] = A;
+                X[k + M] = B;
+            }
+        }
+
+        // TODO: this is ugly, better way to do this?
+        if N == x.len() {
+            match D {
+                FftDirection::Forward => {}
+                FftDirection::Inverse => {
+                    for k in 0..N {
+                        X[k] = X[k] / N as f64;
+                    }
+                }
+            }
+        }
+    }
+
+    pub fn bluestein_fft(&self, direction: FftDirection) -> Signal<Complex64> {
+        let mut _fft = Vec::<Complex64>::with_capacity(self.data.len());
+        for _ in 0..self.data.len() {
+            _fft.push(Complex::new(0.0, 0.0));
+        }
+        unsafe { _fft.set_len(self.data.len()); }
+        Self::_bluestein_fft(&self.to_complex64().data, &mut _fft, self.data.len(), direction);
+        Signal::with_data(self.shape, _fft)
+    }
+    
+    #[allow(non_snake_case)]
+    fn _bluestein_fft(x: &[Complex64], X: &mut [Complex64], N: usize, D: FftDirection) {
+        let mut a = Vec::<Complex64>::with_capacity(N);
+        let mut c = Vec::<Complex64>::with_capacity(N);
+
+        let sign = match D {
+            FftDirection::Forward => -1.0,
+            FftDirection::Inverse => 1.0
+        };
+
+        for n in 0..N {
+            let chirp = Complex::new(0.0, sign * PI / N as f64 * n.pow(2) as f64).exp();
+            a.push(x[n] * chirp);
+
+            let chirp_conjugate = Complex::new(0.0, -sign * (PI / N as f64) * n.pow(2) as f64).exp();
+            c.push(chirp_conjugate);
+        }
+
+        let M = ((2 * N) - 1).next_power_of_two();
+        let cz = Complex::new(0.0, 0.0);
+
+        a.resize(M, cz);
+        c.resize(M, cz);
+
+        for n in 1..N {
+            c[M - n] = c[n];
+        }
+
+        let a = Signal::with_data(SignalShape::OneDimensional(M), a);
+        let c = Signal::with_data(SignalShape::OneDimensional(M), c);
+        
+        let fft_a = a.radix2_fft(D);
+        let fft_c = c.radix2_fft(D);
+        let result = fft_a.mul(fft_c).radix2_fft(D.invert());
+        
+        let scaling = match D {
+            FftDirection::Forward => 1.0,
+            FftDirection::Inverse => M as f64 / N as f64 // TODO: maybe just have scaling be an explicit argument to the fft func?
+        };
+
+        for k in 0..N {
+            X[k] = result.data[k] * Complex::new(0.0, sign * PI / N as f64 * k.pow(2) as f64).exp() * scaling;
+        }
+
     }
     
     /*
      * Xk = Ek + WkN * Ok
      * Xk+N/2 = Ek - WkN * Ok
      */
-    fn _fft(data_in: &[Complex64], N: usize) -> Vec<Complex64> {
+    #[allow(non_snake_case)]
+    fn _fft_dyn_alloc_slow(data_in: &[Complex64], N: usize) -> Vec<Complex64> {
         let mut X = Vec::<Complex64>::with_capacity(N);
-        // SAFETY: N entries being initialized is guaranteed by the structure of the algo
         unsafe { X.set_len(N);}
-        // println!("N: {}", N);
 
-
-        // Once recursed to N == 1, just return the value of the sample.
-        // The sum of 1 sample is just that sample's total
         if N == 1 {
             X[0] = data_in[0];
         } else {
-            // separate even and odd indices
-            let mut Ex = Vec::<Complex64>::with_capacity(N / 2);
-            let mut Ox = Vec::<Complex64>::with_capacity(N / 2);
+            let mut Xe = Vec::<Complex64>::with_capacity(N / 2);
+            let mut Xo = Vec::<Complex64>::with_capacity(N / 2);
 
             for m in 0..N / 2 {
-                Ex.push(data_in[2 * m]);
-                Ox.push(data_in[2 * m + 1]);
+                Xe.push(data_in[2 * m]);
+                Xo.push(data_in[2 * m + 1]);
             }
 
-            let E = Self::_fft(&Ex, N / 2);
-            let O = Self::_fft(&Ox, N / 2);
+            let E = Self::_fft_dyn_alloc_slow(&Xe, N / 2);
+            let O = Self::_fft_dyn_alloc_slow(&Xo, N / 2);
 
             for k in 0..N/2 {
                 // WkN = e^(-i*2*pi*k)/N
                 let W = Complex::new(0.0, (-1.0 * 2.0 * PI * k as f64) / N as f64).exp();
-                X[k] = E[k] + O[k] * W;
-                X[k + N / 2] = E[k] - O[k] * W;
+                let a = E[k];
+                let b = O[k];
+                let A = a + b * W;
+                let B = a - b * W;
+                X[k] = A;
+                X[k + N / 2] = B;
             }
         }
         return X;
@@ -332,6 +515,32 @@ impl<'a, S: Sample> Signal<S> {
         let mut output = S::zero();
         for i in 0..self.data.len() {
             output = output.add(self.data[i].scale_f32(kernel.data[i]));
+        }
+        output
+    }
+
+    fn convolve2(&self, kernel: &Signal<S>) -> Signal<S> {
+        let mut output = Signal::new(SignalShape::OneDimensional(self.data.len() + kernel.data.len() - 1));
+        let kl = kernel.data.len();
+        let sl = self.data.len();
+        let ol = self.data.len() + kernel.data.len();
+        
+        let (a, b) = if sl >= kl {
+            (self, kernel)
+        } else {
+            (kernel, self)
+        };
+        
+        let al = a.data.len();
+        let bl = b.data.len();
+        
+        for k in 0..ol {
+            let mut sum = S::zero();
+            let r = if k < al { 0..k + 1 } else { k - al + 1..al };
+            for i in r {
+                sum = sum.add(a.data[i].mul(b.data[bl - 1 - i]));
+            }
+            output.data.push(sum);
         }
         output
     }
@@ -579,7 +788,7 @@ mod tests {
 
     use super::*;    
     
-    fn read_f64_from_file(file: &str) -> Vec<f64> {
+    fn _read_f64_from_file(file: &str) -> Vec<f64> {
         let mut input = BufReader::new(
             File::open(file).expect("Failed to open file")
         );
@@ -627,46 +836,50 @@ mod tests {
     #[test]
     fn it_transforms_dft() {
         let data = read_complex_from_file("/home/sen/Projects/RS170/sine_wave.complex64");
-        // let data = read_f64_from_file("/home/sen/Projects/RS170/sine_wave.float64");
-
         let signal = Signal::with_data(
             SignalShape::OneDimensional(data.len()),
-            data
-        );
+            data);
 
         let dft = signal.dft();
-        let mut f2 = File::create("/home/sen/Projects/RS170/sine_wave_dft.complex64").unwrap();
-        for val in &dft.data {
-            f2.write(&val.re.to_le_bytes()).unwrap();
-            f2.write(&val.im.to_le_bytes()).unwrap();
-        }
-
-        let mag: Vec<f64> = dft.data.iter().map(|x| (x.re.powi(2) + x.im.powi(2)).sqrt()).collect();
-        let mut f1 = File::create("/home/sen/Projects/RS170/sine_wave_dft_mag.float64").unwrap();
-        for val in mag {
-            f1.write(&val.to_le_bytes()).unwrap();
-        }
+        dft.dump_to_file("/home/sen/Projects/RS170/sine_wave_dft.complex64").unwrap();
     }
     
     #[test]
-    fn it_transforms_fft() {
+    fn it_transforms_fft_dyn_alloc_slow() {
         let data = read_complex_from_file("/home/sen/Projects/RS170/sine_wave.complex64");
         let signal = Signal::with_data(
             SignalShape::OneDimensional(data.len()),
             data
         );
-        let fft = signal.fft();
+        let fft = signal.fft_dyn_alloc_slow();
+        fft.dump_to_file("/home/sen/Projects/RS170/sine_wave_fft.complex64").unwrap();
+    }
 
-        let mut f2 = File::create("/home/sen/Projects/RS170/sine_wave_fft.complex64").unwrap();
-        for val in &fft.data {
-            f2.write(&val.re.to_le_bytes()).unwrap();
-            f2.write(&val.im.to_le_bytes()).unwrap();
-        }
+    #[test]
+    fn it_transforms_fft_radix2() {
+        let data = read_complex_from_file("/home/sen/Projects/RS170/sine_wave.complex64");
+        let signal = Signal::with_data(
+            SignalShape::OneDimensional(data.len()),
+            data);
+        
+        let fft = signal.radix2_fft(FftDirection::Forward);
+        fft.dump_to_file("/home/sen/Projects/RS170/sine_wave_fft.complex64");
 
-        let mag: Vec<f64> = fft.data.iter().map(|x| (x.re.powi(2) + x.im.powi(2)).sqrt()).collect();
-        let mut f1 = File::create("/home/sen/Projects/RS170/sine_wave_fft_mag.float64").unwrap();
-        for val in mag {
-            f1.write(&val.to_le_bytes()).unwrap();
-        }
+        let ifft = fft.radix2_fft(FftDirection::Inverse);
+        ifft.dump_to_file("/home/sen/Projects/RS170/sine_wave_recovered.complex64").unwrap();
+    }
+    
+    #[test]
+    fn it_transforms_fft_bluestein() {
+        let data = read_complex_from_file("/home/sen/Projects/RS170/sine_wave.complex64");
+        let signal = Signal::with_data(
+            SignalShape::OneDimensional(data.len()),
+            data);
+
+        let fft = signal.bluestein_fft(FftDirection::Forward);
+        fft.dump_to_file("/home/sen/Projects/RS170/sine_wave_fft.complex64").unwrap();
+
+        let ifft = fft.bluestein_fft(FftDirection::Inverse);
+        ifft.dump_to_file("/home/sen/Projects/RS170/sine_wave_recovered.complex64").unwrap();
     }
 }
