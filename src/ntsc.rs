@@ -45,7 +45,7 @@ fn _frame_to_signal<S: Sample, C: AsRef<[S]> + AsMut<[S]>>(frame: Signal<S>) {
     // append post-frame blanking lines
     // return full frame baseband signal
     
-    let (width, _height) = if let SignalShape::TwoDimensional(width, height) = frame.shape {
+    let (_, _height) = if let SignalShape::TwoDimensional(width, height) = frame.shape {
         (width, height)
     } else {
         panic!("bad frame shape")
